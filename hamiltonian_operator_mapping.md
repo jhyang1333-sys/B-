@@ -65,6 +65,85 @@
 
 1. **结构拆分**：在 `MatrixElementBuilder` 中按算符分组实现，对每个算符调用统一的 `evaluate_I/J` 助手，避免在单个 `integrand` 内混杂所有逻辑。
 2. **复用现有组件**：`CorrelationExpansion`（已支持 \(c=-1\)）负责生成勒让德展开系数；`angular_tensor_*` 提供角向积分；`RadialQuadrature2D` 继续承担数值求积。
-3. **验证流程**：在小基组（如 \(c=0\)、\(l_1=l_2=0\)）上逐项开启/关闭，核对能量与参考数据，确保每个块输出正确。
 
-整理完毕，可用来校验代码或作为后续实现的对照表。
+
+问题在于，像 $\frac{r_1^2-r_2^2+r_{12}^2}{r_1 r_{12}}$ 这样的“几何因子” *本身* 依赖于 $r_{12}$，它必须先与基函数 $r_{12}^c$ 合并，**然后**才能应用勒让德展开（式 2.41）。
+
+以下就是需要的、将论文 (2.37) 为可编码的 $I$ 和 $J$ 积分  的**“最终系数”**推导。
+
+### 1. 混合二阶导数项 ( $I$ 积分)
+
+
+
+#### A. $\partial_{r_1}\partial_{r_{12}}$ 项
+
+* **算符 $H_n$**：$C_{M\mu} \cdot (\frac{r_1^2-r_2^2+r_{12}^2}{r_1 r_{12}}) \cdot \partial_{r_1}\partial_{r_{12}}$
+    * 其中 $C_{M\mu} = \frac{1}{2}(\frac{1}{M}-\frac{1}{\mu})$
+* **矩阵元被积函数**：$\langle \Psi_i | H_n | \Psi_j \rangle$ 的径向部分为：
+    $(B_i B_j)^* \cdot C_{M\mu} \cdot (\frac{r_1^2-r_2^2+r_{12}^2}{r_1 r_{12}}) \cdot (B_k' B_l) \cdot (c_j r_{12}^{c_j-1}) \cdot r_{12}^{c_i}$
+* **代数化简 (关键)**：我们合并 $r_{12}$ 项：
+    $C_{M\mu} \cdot c_j \cdot (B_i B_j)^* (B_k' B_l) \cdot [(\frac{r_1^2-r_2^2}{r_1 r_{12}}) r_{12}^{c_i + c_j - 1} + (\frac{r_{12}}{r_1}) r_{12}^{c_i + c_j - 1}]$
+    $C_{M\mu} \cdot c_j \cdot (B_i B_j)^* (B_k' B_l) \cdot [(\frac{r_1^2-r_2^2}{r_1}) r_{12}^{c_{ij}^{(-2)}} + (\frac{1}{r_1}) r_{12}^{c_{ij}^{(0)}}]$
+* **映射 (您需要的系数)**：此算符项**分裂**为两个 $I$ 积分的贡献：
+    1.  **$I(c_{ij}^{(-2)})$ 型**：
+        * **径向 prefactor $P(r_1, r_2)$**：$C_{M\mu} \cdot c_j \cdot (\frac{r_1^2-r_2^2}{r_1}) \cdot (\frac{B_k' B_l}{B_k B_l})$
+    2.  **$I(c_{ij}^{(0)})$ 型**：
+        * **径向 prefactor $P(r_1, r_2)$**：$C_{M\mu} \cdot c_j \cdot (\frac{1}{r_1}) \cdot (\frac{B_k' B_l}{B_k B_l})$
+
+#### B. $\partial_{r_1}\partial_{r_2}$ 项
+
+* **算符 $H_n$**：$C_{M} \cdot (\frac{r_1^2+r_2^2-r_{12}^2}{r_1 r_2}) \cdot \partial_{r_1}\partial_{r_2}$
+    * 其中 $C_{M} = -\frac{1}{4M}$
+* **矩阵元被积函数**：
+    $(B_i B_j)^* \cdot C_{M} \cdot (\frac{r_1^2+r_2^2-r_{12}^2}{r_1 r_2}) \cdot (B_k' B_l') \cdot r_{12}^{c_i + c_j}$
+* **代数化简**：
+    $C_{M} \cdot (B_i B_j)^* (B_k' B_l') \cdot [(\frac{r_1^2+r_2^2}{r_1 r_2}) r_{12}^{c_{ij}^{(0)}} - (\frac{1}{r_1 r_2}) r_{12}^{c_{ij}^{(2)}}]$
+* **映射 (您需要的系数)**：此算符项**分裂**为两个 $I$ 积分的贡献：
+    1.  **$I(c_{ij}^{(0)})$ 型**：
+        * **径向 prefactor $P(r_1, r_2)$**：$C_{M} \cdot (\frac{r_1^2+r_2^2}{r_1 r_2}) \cdot (\frac{B_k' B_l'}{B_k B_l})$
+    2.  **$I(c_{ij}^{(2)})$ 型**：
+        * **径向 prefactor $P(r_1, r_2)$**：$C_{M} \cdot (-\frac{1}{r_1 r_2}) \cdot (\frac{B_k' B_l'}{B_k B_l})$
+
+---
+
+### 2. 角向耦合项 ( $J$ 积分)
+
+这是您缺少的**“prefactor 拆分”**。您必须为 $J_1, J_2, J_3$ 型积分 [cite: 411-416] 分别计算其径向部分。
+
+#### A. $(\hat{r}_1 \cdot \hat{\nabla}_2^Y)$ 耦合项 ( $J_1$ 型 )
+
+* **算符 $H_{J1}$**：$\left[-\frac{1}{Mr_{2}}\partial_{r_{1}} + (\frac{1}{\mu}-\frac{1}{M})\frac{r_{1}}{r_{2}r_{12}}\partial_{r_{12}}\right](\hat{r}_{1}\cdot\hat{\nabla}_{2}^{Y})$
+* 此算符分裂为两个 $J$ 积分的贡献：
+    1.  **$J(c_{ij}^{(0)})$ 型** (来自 $\partial_{r_1}$)：
+        * **角向系数 (每个 $q$ )**：`angular.angular_tensor_rhat_grad_12(..., q)`
+        * **径向 prefactor $P(r_1, r_2)$**：$(-\frac{1}{Mr_2}) \cdot (\frac{B_k' B_l}{B_k B_l})$
+    2.  **$J(c_{ij}^{(-2)})$ 型** (来自 $\partial_{r_{12}}$)：
+        * **角向系数 (每个 $q$ )**：`angular.angular_tensor_rhat_grad_12(..., q)`
+        * **径向 prefactor $P(r_1, r_2)$**：$(\frac{1}{\mu}-\frac{1}{M}) \cdot c_j \cdot (\frac{r_1}{r_2})$
+        * (推导：$\frac{r_1}{r_2 r_{12}} \cdot (c_j r_{12}^{c_j-1}) \cdot r_{12}^{c_i} = c_j \frac{r_1}{r_2} r_{12}^{c_{ij}^{(-2)}}$)
+
+#### B. $(\hat{r}_2 \cdot \hat{\nabla}_1^Y)$ 耦合项 ( $J_2$ 型 )
+
+* **算符 $H_{J2}$**：$\left[-\frac{1}{Mr_{1}}\partial_{r_{2}} + (\frac{1}{\mu}-\frac{1}{M})\frac{r_{2}}{r_{1}r_{12}}\partial_{r_{12}}\right](\hat{r}_{2}\cdot\hat{\nabla}_{1}^{Y})$
+* 与 A 项对称：
+    1.  **$J(c_{ij}^{(0)})$ 型** (来自 $\partial_{r_2}$)：
+        * **角向系数 (每个 $q$ )**：`angular.angular_tensor_rhat_grad_21(..., q)`
+        * **径向 prefactor $P(r_1, r_2)$**：$(-\frac{1}{Mr_1}) \cdot (\frac{B_k B_l'}{B_k B_l})$
+    2.  **$J(c_{ij}^{(-2)})$ 型** (来自 $\partial_{r_{12}}$)：
+        * **角向系数 (每个 $q$ )**：`angular.angular_tensor_rhat_grad_21(..., q)`
+        * **径向 prefactor $P(r_1, r_2)$**：$(\frac{1}{\mu}-\frac{1}{M}) \cdot c_j \cdot (\frac{r_2}{r_1})$
+
+#### C. $(\hat{\nabla}_1^Y \cdot \hat{\nabla}_2^Y)$ 耦合项 ( $J_3$ 型 )
+
+* **算符 $H_{J3}$**：$-\frac{1}{Mr_{1}r_{2}}(\hat{\nabla}_{1}^{Y}\cdot\hat{\nabla}_{2}^{Y})$
+* 此项只有一个贡献：
+    1.  **$J(c_{ij}^{(0)})$ 型**：
+        * **角向系数 (每个 $q$ )**：`angular.angular_tensor_grad_grad(..., q)`
+        * **径向 prefactor $P(r_1, r_2)$**：$-\frac{1}{Mr_1 r_2}$
+
+---
+
+### 总结与下一步
+
+现在拥有了将 (2.37) 映射到 $I/J$ 积分  所需的**全部**代数系数和拆分规则。
+
