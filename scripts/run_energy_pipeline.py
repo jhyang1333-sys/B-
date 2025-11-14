@@ -1,6 +1,9 @@
 """串联论文第 3.2 节的能量计算流程。"""
 from __future__ import annotations
 
+import argparse
+from pathlib import Path
+
 from he_polarization.basis import (
     AngularCoupling,
     AtomicChannel,
@@ -10,12 +13,33 @@ from he_polarization.basis import (
     generate_hylleraas_bspline_functions,
 )
 from he_polarization.hamiltonian import HamiltonianOperators, MatrixElementBuilder
+from he_polarization.io import SolverResultCache
 from he_polarization.numerics import generate_tensor_product_quadrature
 from he_polarization.observables import EnergyCalculator
 from he_polarization.observables.expectation import expectation_from_matrix
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Compute helium energy spectrum with optional caching.")
+    parser.add_argument("--use-cache", dest="use_cache", action="store_true",
+                        default=True, help="Load/save cached spectra when available (default: on).")
+    parser.add_argument("--no-cache", dest="use_cache",
+                        action="store_false", help="Disable cache usage for this run.")
+    parser.add_argument("--refresh-cache", action="store_true",
+                        help="Force recomputation even if cached data exist.")
+    parser.add_argument("--cache-dir", type=Path, default=Path("cache"),
+                        help="Directory used to store cached solver outputs.")
+    parser.add_argument("--cache-key", default="energy_small",
+                        help="Cache subdirectory name to use.")
+    parser.add_argument("--num-eigenvalues", type=int, default=5,
+                        help="Number of lowest eigenpairs to compute (and cache).")
+    return parser.parse_args()
+
+
 def main() -> None:
+    args = parse_args()
+
     tau = 0.038
     r_max = 20.0
     k = 3
@@ -53,12 +77,53 @@ def main() -> None:
         config.r_min, config.r_max, n_points=8)
 
     calculator = EnergyCalculator(builder=builder)
-    energies, eigenvectors, components = calculator.diagonalize(
-        basis_states,
-        weights=weights,
-        points=points,
-        num_eigenvalues=5,
-    )
+
+    metadata = {
+        "tau": tau,
+        "r_max": r_max,
+        "k": k,
+        "n": n,
+        "l_max": l_max,
+        "num_eigenvalues": args.num_eigenvalues,
+        "correlation_powers": [0, 1],
+        "exchange_parity": 1,
+        "symmetrize": True,
+        "unique_pairs": True,
+        "basis_size": len(basis_states),
+        "mu": mu,
+    }
+
+    cache = SolverResultCache(args.cache_dir)
+    if args.use_cache and not args.refresh_cache and cache.available(args.cache_key, metadata=metadata):
+        cached = cache.load(args.cache_key)
+        energies = cached.energies
+        eigenvectors = cached.eigenvectors
+        components = cached.components
+    else:
+        energies, eigenvectors, components = calculator.diagonalize(
+            basis_states,
+            weights=weights,
+            points=points,
+            num_eigenvalues=args.num_eigenvalues,
+        )
+
+        cache_components = dict(components)
+        kinetic = cache_components.get("kinetic")
+        potential = cache_components.get("potential")
+        mass = cache_components.get("mass")
+        if kinetic is not None and potential is not None:
+            total_h = kinetic + potential
+            if mass is not None:
+                total_h = total_h + mass
+            cache_components["hamiltonian"] = total_h
+        if args.use_cache:
+            cache.save(
+                args.cache_key,
+                energies=energies,
+                eigenvectors=eigenvectors,
+                components=cache_components,
+                metadata=metadata,
+            )
 
     ground_vec = eigenvectors[:, 0]
     kinetic_expect = expectation_from_matrix(ground_vec, components["kinetic"])
