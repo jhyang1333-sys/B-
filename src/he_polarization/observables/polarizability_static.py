@@ -34,10 +34,10 @@ class StaticPolarizabilityCalculator:
         contributions = 2.0 * np.abs(matrix_elements) ** 2 / diffs
         return float(np.sum(contributions))
 
-    def compute_velocity_gauge(self, energies: np.ndarray, dipole_matrix: np.ndarray, state_index: int) -> float:
-        """基于振子强度的静态极化率，参考公式 (1.7)。"""
+    def compute_velocity_gauge(self, energies: np.ndarray, momentum_matrix: np.ndarray, state_index: int) -> float:
+        """Velocity-gauge polarizability via momentum matrix elements."""
         energies = np.asarray(energies, dtype=float)
-        dipole_matrix = np.asarray(dipole_matrix, dtype=float)
+        momentum_matrix = np.asarray(momentum_matrix, dtype=complex)
 
         E0 = energies[state_index]
         diffs = energies - E0
@@ -45,13 +45,12 @@ class StaticPolarizabilityCalculator:
         mask[state_index] = False
 
         diffs = diffs[mask]
-        matrix_elements = dipole_matrix[state_index, mask]
+        matrix_elements = momentum_matrix[state_index, mask]
 
-        oscillator_strengths = 2.0 * np.abs(matrix_elements) ** 2 * diffs
         if np.any(np.isclose(diffs, 0.0)):
             raise ZeroDivisionError("存在与参考态简并的能级，无法直接使用速度规范公式。")
 
-        contributions = oscillator_strengths / (diffs ** 2)
+        contributions = 2.0 * np.abs(matrix_elements) ** 2 / (diffs ** 3)
         return float(np.sum(contributions))
 
     def relative_difference(self, length_value: float, velocity_value: float) -> float:

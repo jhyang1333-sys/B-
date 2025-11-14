@@ -16,7 +16,10 @@ from he_polarization.basis import (
 from he_polarization.hamiltonian import HamiltonianOperators, MatrixElementBuilder
 from he_polarization.numerics import generate_tensor_product_quadrature
 from he_polarization.observables import DynamicPolarizabilityCalculator, EnergyCalculator
-from he_polarization.observables.dipole import build_dipole_matrix
+from he_polarization.observables.dipole import (
+    build_dipole_matrix,
+    build_velocity_gauge_matrix,
+)
 from he_polarization.reporting import plot_dynamic_polarizability
 
 
@@ -24,7 +27,8 @@ def main() -> None:
     tau = 0.038
     r_max = 200.0
     k = 5
-    n = 15
+    n = 50
+    l_max = 4
 
     config = ExponentialNodeConfig(
         r_min=0.0, r_max=r_max, k=k, n=n, gamma=r_max * tau)
@@ -32,25 +36,32 @@ def main() -> None:
     bspline = BSplineBasis(knots=knots, order=k)
 
     angular = AngularCoupling()
-    operators = HamiltonianOperators(mu=1.0, M=1836.15267389)
+    m_nucleus = 1836.15267389
+    mu = m_nucleus / (1.0 + m_nucleus)
+    operators = HamiltonianOperators(mu=mu, M=m_nucleus)
     builder = MatrixElementBuilder(
         bspline=bspline, angular=angular, operators=operators)
 
-    channel = AtomicChannel(l1=0, l2=0, L=0)
+    channels = [
+        AtomicChannel(l1=l1, l2=l2, L=L)
+        for l1 in range(l_max + 1)
+        for l2 in range(l_max + 1)
+        for L in range(abs(l1 - l2), min(l1 + l2, l_max) + 1)
+    ]
     basis_states = generate_hylleraas_bspline_functions(
         bspline,
-        [channel],
+        channels,
         n_radial=bspline.n_basis,
-        correlation_powers=(0,),
+        correlation_powers=(0, 1),
         exchange_parity=1,
-        symmetrize=False,
-        unique_pairs=False,
+        symmetrize=True,
+        unique_pairs=True,
     )
     points, weights = generate_tensor_product_quadrature(
         config.r_min, config.r_max, n_points=8)
 
     calculator = EnergyCalculator(builder=builder)
-    energies, eigenvectors, _ = calculator.diagonalize(
+    energies, eigenvectors, components = calculator.diagonalize(
         basis_states, weights=weights, points=points)
 
     dipole_basis = build_dipole_matrix(
@@ -61,13 +72,25 @@ def main() -> None:
         weights=weights,
         points=points,
     )
+    momentum_basis = build_velocity_gauge_matrix(
+        dipole_basis,
+        components,
+        reduced_mass=builder.operators.mu,
+    )
+
     dipole_eigen = eigenvectors.conj().T @ dipole_basis @ eigenvectors
+    momentum_eigen = eigenvectors.conj().T @ momentum_basis @ eigenvectors
 
     dynamic_calc = DynamicPolarizabilityCalculator(
         energy_calculator=calculator)
     freqs = np.linspace(0.0, 0.8, 40)
     length, velocity, acceleration = dynamic_calc.evaluate(
-        energies, dipole_eigen, state_index=0, freqs=freqs)
+        energies,
+        dipole_eigen,
+        momentum_eigen,
+        state_index=0,
+        freqs=freqs,
+    )
 
     output_dir = Path("outputs")
     output_dir.mkdir(parents=True, exist_ok=True)

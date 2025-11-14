@@ -1,7 +1,7 @@
 """计算偶极矩阵元。"""
 from __future__ import annotations
 
-from typing import Dict, Iterable, NamedTuple, Sequence, Tuple, Union
+from typing import Dict, Iterable, Mapping, NamedTuple, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -208,3 +208,52 @@ def build_dipole_matrix(
                 dipole[col, row] = total
 
     return dipole
+
+
+def build_velocity_gauge_matrix(
+    dipole_matrix: np.ndarray,
+    components: Mapping[str, np.ndarray],
+    *,
+    reduced_mass: float = 1.0,
+) -> np.ndarray:
+    """Construct the velocity-gauge momentum operator via ``p = i μ [H, R]``.
+
+    Parameters
+    ----------
+    dipole_matrix
+        Length-gauge dipole operator in the configuration basis.
+    components
+        Matrix components returned by :class:`MatrixElementBuilder`; these
+        must include the ``"kinetic"``, ``"mass"`` and ``"potential"``
+        blocks produced during Hamiltonian assembly.
+
+    reduced_mass
+        Reduced mass ``μ`` appearing in ``T = p^2 / (2μ)``. Defaults to
+        atomic-unit electron mass.
+
+    Returns
+    -------
+    numpy.ndarray
+        Velocity-gauge momentum operator matrix corresponding to论文式
+        ``i μ [H, R]``.
+    """
+
+    kinetic = components.get("kinetic")
+    if kinetic is None:
+        raise KeyError(
+            "Kinetic matrix is required to build the velocity gauge operator.")
+
+    potential = components.get("potential")
+    if potential is None:
+        raise KeyError(
+            "Potential matrix is required to build the velocity gauge operator.")
+
+    mass = components.get("mass")
+
+    hamiltonian = kinetic.copy()
+    if mass is not None:
+        hamiltonian = hamiltonian + mass
+    hamiltonian = hamiltonian + potential
+
+    commutator = hamiltonian @ dipole_matrix - dipole_matrix @ hamiltonian
+    return 1j * reduced_mass * commutator

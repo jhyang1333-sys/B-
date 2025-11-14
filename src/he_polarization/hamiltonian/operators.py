@@ -13,11 +13,8 @@ class HamiltonianOperators:
     mu: float
     M: float
 
-    def potential_terms(self, r1: float, r2: float, r12: float) -> float:
-        """返回库仑势能项，对应论文式 (2.9)。
-
-        其中 ``r12`` 取角向积分后的有效 ``r_>``，避免近零差引发数值爆炸。
-        """
-        if r1 <= 0 or r2 <= 0 or r12 <= 0:
+    def potential_terms(self, r1: float, r2: float) -> float:
+        """返回电子-核势能 ``V_{en}``，对应论文式 (2.9) 的前两项。"""
+        if r1 <= 0 or r2 <= 0:
             raise ValueError("径向距离必须为正。")
-        return -2.0 / r1 - 2.0 / r2 + 1.0 / r12
+        return -2.0 / r1 - 2.0 / r2

@@ -40,10 +40,12 @@ class CorrelationExpansion:
         若未指定则按照 ``2 * (c + 5)`` 作为经验截断。
         """
 
-        if c < 0:
-            raise ValueError("关联幂次 c 必须为非负整数。")
+        if c < -1:
+            raise ValueError("关联幂次 c 必须大于等于 -1。")
 
-        if c % 2 == 0:
+        if c == -1:
+            q_max = self._q_cutoff.get(-1, 2 * (abs(c) + 5))
+        elif c % 2 == 0:
             q_max = c // 2
         else:
             q_max = self._q_cutoff.get(c, 2 * (c + 5))
@@ -57,6 +59,8 @@ class CorrelationExpansion:
 
     @staticmethod
     def _iter_k_indices(c: int, q: int) -> Iterable[int]:
+        if c == -1:
+            return (0,)
         if c % 2 == 0:
             return range(0, c // 2 - q + 1)
         upper = (c + 1) // 2
@@ -65,8 +69,24 @@ class CorrelationExpansion:
     @staticmethod
     @lru_cache(maxsize=None)
     def _coefficient(c: int, q: int, k: int) -> float:
+        if c == -1:
+            if k != 0 or q < 0:
+                return 0.0
+            return 1.0
+        if c < 0 or q < 0 or k < 0:
+            return 0.0
+
+        index = 2 * k + 1
+        if index > c + 2:
+            return 0.0
+
+        try:
+            binomial = math.comb(c + 2, index)
+        except ValueError:
+            return 0.0
+
         numerator = (2 * q + 1) / (c + 2)
-        numerator *= (c + 2) / (2 * k + 1)
+        numerator *= binomial
 
         s_qc = min(q - 1, (c + 1) // 2)
         product = 1.0

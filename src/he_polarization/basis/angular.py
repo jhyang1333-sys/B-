@@ -14,7 +14,7 @@ from sympy.physics.wigner import wigner_3j, wigner_6j
 class AngularCoupling:
     """封装角动量耦合系数与相关积分计算。
 
-    后续将实现：
+
     - 矢量耦合积 Lambda_{l1 l2}^{LM}
     - 3j、6j 符号与 Clebsch-Gordan 系数
     - 角向积分 G1 / G_{r1,r2}

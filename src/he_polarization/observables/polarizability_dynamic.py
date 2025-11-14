@@ -15,10 +15,18 @@ class DynamicPolarizabilityCalculator:
 
     energy_calculator: EnergyCalculator
 
-    def evaluate(self, energies: np.ndarray, dipole_matrix: np.ndarray, state_index: int, freqs: Iterable[float]) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def evaluate(
+        self,
+        energies: np.ndarray,
+        dipole_matrix: np.ndarray,
+        momentum_matrix: np.ndarray,
+        state_index: int,
+        freqs: Iterable[float],
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """返回长度、速度、加速度三种规范的极化率序列。"""
         energies = np.asarray(energies, dtype=float)
         dipole_matrix = np.asarray(dipole_matrix, dtype=float)
+        momentum_matrix = np.asarray(momentum_matrix, dtype=complex)
         freqs = np.asarray(tuple(freqs), dtype=float)
 
         E0 = energies[state_index]
@@ -28,8 +36,8 @@ class DynamicPolarizabilityCalculator:
 
         delta = diffs[mask]
         matrix_elements = dipole_matrix[state_index, mask]
-        oscillator_strengths = 2.0 * np.abs(matrix_elements) ** 2 * delta
-        acceleration_elements = delta ** 2 * matrix_elements  # 近似：来自双对易关系
+        momentum_elements = momentum_matrix[state_index, mask]
+        acceleration_elements = delta ** 2 * matrix_elements
 
         length_values = np.zeros_like(freqs)
         velocity_values = np.zeros_like(freqs)
@@ -39,9 +47,14 @@ class DynamicPolarizabilityCalculator:
             denom = delta ** 2 - omega ** 2
             length_values[idx] = np.sum(
                 2.0 * np.abs(matrix_elements) ** 2 * delta / denom)
-            velocity_values[idx] = np.sum(oscillator_strengths / denom)
+            velocity_values[idx] = np.sum(
+                2.0 * np.abs(momentum_elements) ** 2 / (delta * denom)
+            )
             acceleration_values[idx] = np.sum(
-                np.abs(acceleration_elements) ** 2 / denom)
+                2.0
+                * np.abs(acceleration_elements) ** 2
+                / (delta ** 3 * denom)
+            )
 
         return length_values, velocity_values, acceleration_values
 
