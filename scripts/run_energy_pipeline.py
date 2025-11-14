@@ -17,10 +17,10 @@ from he_polarization.observables.expectation import expectation_from_matrix
 
 def main() -> None:
     tau = 0.038
-    r_max = 200.0
-    k = 5
-    n = 50
-    l_max = 4
+    r_max = 20.0
+    k = 3
+    n = 8
+    l_max = 1
 
     config = ExponentialNodeConfig(
         r_min=0.0, r_max=r_max, k=k, n=n, gamma=r_max * tau)
@@ -54,7 +54,11 @@ def main() -> None:
 
     calculator = EnergyCalculator(builder=builder)
     energies, eigenvectors, components = calculator.diagonalize(
-        basis_states, weights=weights, points=points)
+        basis_states,
+        weights=weights,
+        points=points,
+        num_eigenvalues=5,
+    )
 
     ground_vec = eigenvectors[:, 0]
     kinetic_expect = expectation_from_matrix(ground_vec, components["kinetic"])

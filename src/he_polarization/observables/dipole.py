@@ -1,6 +1,7 @@
 """计算偶极矩阵元。"""
 from __future__ import annotations
 
+from collections import defaultdict
 from typing import Dict, Iterable, Mapping, NamedTuple, Sequence, Tuple, Union
 
 import numpy as np
@@ -11,6 +12,12 @@ from he_polarization.basis.angular import AngularCoupling
 from he_polarization.basis.functions import HylleraasBSplineFunction
 from he_polarization.numerics import RadialQuadrature2D, RadialPointData
 from he_polarization.basis.correlation import CorrelationExpansion, CorrelationTerm
+from he_polarization.observables.expectation import MatrixLike
+
+try:  # SciPy is optional at import time but required for sparse operators
+    from scipy.sparse import coo_matrix, csr_matrix, issparse
+except ModuleNotFoundError:  # pragma: no cover
+    coo_matrix = csr_matrix = issparse = None  # type: ignore[assignment]
 
 
 class _DipoleBasisTerm(NamedTuple):
@@ -97,7 +104,7 @@ def build_dipole_matrix(
     correlation: CorrelationExpansion | None = None,
     weights: Iterable[float],
     points: Iterable[Tuple[float, float]],
-) -> np.ndarray:
+) -> MatrixLike:
     """构建偶极矩阵 ``<φ_i| r_1 + r_2 |φ_j>``，包含角向耦合。"""
 
     _ = weights, points  # 外部节点保留以兼容旧接口
@@ -114,7 +121,7 @@ def build_dipole_matrix(
         _expand_state(state) for state in states
     )
     size = len(states)
-    dipole = np.zeros((size, size), dtype=float)
+    dipole_entries: Dict[Tuple[int, int], float] = defaultdict(float)
 
     quadrature = RadialQuadrature2D(bspline=bspline, order=8)
 
@@ -203,19 +210,28 @@ def build_dipole_matrix(
                             ang_r1 * integral_r1 + ang_r2 * integral_r2
                         )
 
-            dipole[row, col] = total
-            if row != col:
-                dipole[col, row] = total
+            if total != 0.0:
+                dipole_entries[(row, col)] += total
+                if row != col:
+                    dipole_entries[(col, row)] += total
 
-    return dipole
+    if coo_matrix is None:
+        raise ModuleNotFoundError("需要 SciPy 才能构建稀疏偶极矩阵。")
+
+    if not dipole_entries:
+        return coo_matrix((size, size))
+
+    rows, cols, data = zip(*((i, j, v)
+                             for (i, j), v in dipole_entries.items()))
+    return coo_matrix((data, (rows, cols)), shape=(size, size))
 
 
 def build_velocity_gauge_matrix(
-    dipole_matrix: np.ndarray,
-    components: Mapping[str, np.ndarray],
+    dipole_matrix: MatrixLike,
+    components: Mapping[str, MatrixLike],
     *,
     reduced_mass: float = 1.0,
-) -> np.ndarray:
+) -> MatrixLike:
     """Construct the velocity-gauge momentum operator via ``p = i μ [H, R]``.
 
     Parameters
@@ -250,10 +266,22 @@ def build_velocity_gauge_matrix(
 
     mass = components.get("mass")
 
-    hamiltonian = kinetic.copy()
+    hamiltonian = _as_csr(kinetic)
     if mass is not None:
-        hamiltonian = hamiltonian + mass
-    hamiltonian = hamiltonian + potential
+        hamiltonian = hamiltonian + _as_csr(mass)
+    hamiltonian = hamiltonian + _as_csr(potential)
 
-    commutator = hamiltonian @ dipole_matrix - dipole_matrix @ hamiltonian
+    dipole_sparse = _as_csr(dipole_matrix)
+
+    comm_left = hamiltonian @ dipole_sparse
+    comm_right = dipole_sparse @ hamiltonian
+    commutator = comm_left - comm_right
     return 1j * reduced_mass * commutator
+
+
+def _as_csr(matrix: MatrixLike):
+    if csr_matrix is None or issparse is None:
+        raise ModuleNotFoundError("需要 SciPy 才能处理稀疏矩阵组件。")
+    if issparse(matrix):
+        return matrix.tocsr()  # type: ignore[attr-defined]
+    return csr_matrix(np.asarray(matrix))

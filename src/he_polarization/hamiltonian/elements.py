@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Dict, Iterable, Tuple, Union
 
 import numpy as np
+from scipy.sparse import coo_matrix
 
 from he_polarization.basis.bspline import BSplineBasis
 from he_polarization.basis.angular import AngularCoupling
@@ -56,7 +57,7 @@ class MatrixElementBuilder:
         *,
         weights: Iterable[float],
         points: Iterable[Tuple[float, float]],
-    ) -> tuple[np.ndarray, np.ndarray, Dict[str, np.ndarray]]:
+    ) -> tuple[coo_matrix, coo_matrix, Dict[str, coo_matrix]]:
         """批量构建 ``H`` 与 ``O`` 以及单独的算符分量矩阵。"""
 
         # 外部提供的张量积求积节点暂未使用，保留参数以兼容先前接口。
@@ -70,10 +71,10 @@ class MatrixElementBuilder:
         ]
         size = len(states)
 
-        overlap = np.zeros((size, size), dtype=float)
-        potential = np.zeros((size, size), dtype=float)
-        kinetic = np.zeros((size, size), dtype=float)
-        mass = np.zeros((size, size), dtype=float)
+        overlap_entries: Dict[Tuple[int, int], float] = {}
+        potential_entries: Dict[Tuple[int, int], float] = {}
+        kinetic_entries: Dict[Tuple[int, int], float] = {}
+        mass_entries: Dict[Tuple[int, int], float] = {}
 
         quadrature = RadialQuadrature2D(self.bspline, order=8)
 
@@ -1015,24 +1016,29 @@ class MatrixElementBuilder:
                                 )
                                 total_vee += coeff_base_vee * ang_vee.g1 * integral_vee
 
-                overlap[row, col] = total_overlap
-                potential[row, col] = total_potential + total_vee
-                kinetic[row, col] = total_kinetic_mu
-                mass[row, col] = total_mass
+                potential_total = total_potential + total_vee
+                overlap_entries[(row, col)] = total_overlap
+                potential_entries[(row, col)] = potential_total
+                kinetic_entries[(row, col)] = total_kinetic_mu
+                mass_entries[(row, col)] = total_mass
 
                 if row != col:
-                    overlap[col, row] = total_overlap
-                    potential[col, row] = total_potential + total_vee
-                    kinetic[col, row] = total_kinetic_mu
-                    mass[col, row] = total_mass
+                    overlap_entries[(col, row)] = total_overlap
+                    potential_entries[(col, row)] = potential_total
+                    kinetic_entries[(col, row)] = total_kinetic_mu
+                    mass_entries[(col, row)] = total_mass
 
-        def _symmetrize(matrix: np.ndarray) -> np.ndarray:
-            return 0.5 * (matrix + matrix.T)
+        def _to_sparse(entries: Dict[Tuple[int, int], float]) -> coo_matrix:
+            if not entries:
+                return coo_matrix((size, size))
+            rows, cols, data = zip(*((i, j, v)
+                                   for (i, j), v in entries.items()))
+            return coo_matrix((data, (rows, cols)), shape=(size, size))
 
-        overlap = _symmetrize(overlap)
-        potential = _symmetrize(potential)
-        kinetic = _symmetrize(kinetic)
-        mass = _symmetrize(mass)
+        overlap = _to_sparse(overlap_entries)
+        potential = _to_sparse(potential_entries)
+        kinetic = _to_sparse(kinetic_entries)
+        mass = _to_sparse(mass_entries)
 
         h_total = kinetic + mass + potential
         components = {
