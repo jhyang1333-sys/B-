@@ -3,8 +3,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from functools import lru_cache
-from typing import Dict, Tuple
+from typing import Callable, Dict, Tuple
 
 import numpy as np
 from scipy.special import sph_harm
@@ -25,7 +24,14 @@ class AngularCoupling:
                    float] = field(default_factory=dict)
     cache_6j: Dict[Tuple[int, int, int, int, int, int],
                    float] = field(default_factory=dict)
-    cache_rhat_dot: Dict[Tuple[int, int, int, int, int, int], float] = field(default_factory=dict)
+    cache_rhat_dot: Dict[Tuple[int, int, int, int,
+                               int, int], float] = field(default_factory=dict)
+    cache_rhat_grad_12: Dict[Tuple[int, int, int, int,
+                                   int, int], float] = field(default_factory=dict)
+    cache_rhat_grad_21: Dict[Tuple[int, int, int, int,
+                                   int, int], float] = field(default_factory=dict)
+    cache_grad_grad: Dict[Tuple[int, int, int, int,
+                                int, int], float] = field(default_factory=dict)
 
     def clebsch_gordan(self, l1: int, m1: int, l2: int, m2: int, L: int, M: int) -> float:
         """返回 Clebsch-Gordan 系数。"""
@@ -107,7 +113,15 @@ class AngularCoupling:
 
         return self.angular_tensor_g1_explicit(l1, l2, L, l1p, l2p, Lp, q)
 
-    def angular_tensor_rhat_dot(
+    @staticmethod
+    def _b_coefficient(l: int, T: int) -> float:
+        if T == l - 1:
+            return float(l + 1)
+        if T == l + 1:
+            return float(-l)
+        return 0.0
+
+    def _angular_tensor_rhat_weighted(
         self,
         l1: int,
         l2: int,
@@ -116,19 +130,12 @@ class AngularCoupling:
         l2p: int,
         Lp: int,
         q: int,
+        *,
+        weight_fn: Callable[[int, int], float],
     ) -> float:
-        r"""实现论文式 (2.70) 中 ``\hat{r}_1 \cdot \hat{r}_2`` 的角向部分。"""
-
-        key = (l1, l2, L, l1p, l2p, q)
-        cache = self.cache_rhat_dot
-        if key in cache:
-            return cache[key]
-
         if L != Lp:
-            cache[key] = 0.0
             return 0.0
         if not (self._triangle_condition(l1p, q, l1) and self._triangle_condition(l2p, q, l2)):
-            cache[key] = 0.0
             return 0.0
 
         prefactor = math.sqrt(
@@ -162,11 +169,16 @@ class AngularCoupling:
                 if abs(three_4) < 1e-14:
                     continue
 
+                weight = weight_fn(T1, T2)
+                if abs(weight) < 1e-14:
+                    continue
+
                 six_1 = self.wigner_6j(T2, l2, 1, l1, T1, L)
                 six_2 = self.wigner_6j(l2p, T2, q, T1, l1p, Lp)
 
                 term = (
-                    (2 * T1 + 1)
+                    weight
+                    * (2 * T1 + 1)
                     * (2 * T2 + 1)
                     * three_1
                     * three_2
@@ -177,7 +189,126 @@ class AngularCoupling:
                 )
                 total += term
 
-        value = prefactor * total
+        return prefactor * total
+
+    def angular_tensor_rhat_dot(
+        self,
+        l1: int,
+        l2: int,
+        L: int,
+        l1p: int,
+        l2p: int,
+        Lp: int,
+        q: int,
+    ) -> float:
+        r"""实现论文式 (2.70) 中 ``\hat{r}_1 \cdot \hat{r}_2`` 的角向部分。"""
+
+        key = (l1, l2, L, l1p, l2p, q)
+        cache = self.cache_rhat_dot
+        if key in cache:
+            return cache[key]
+
+        value = self._angular_tensor_rhat_weighted(
+            l1,
+            l2,
+            L,
+            l1p,
+            l2p,
+            Lp,
+            q,
+            weight_fn=lambda _T1, _T2: 1.0,
+        )
+        cache[key] = value
+        return value
+
+    def angular_tensor_rhat_grad_12(
+        self,
+        l1: int,
+        l2: int,
+        L: int,
+        l1p: int,
+        l2p: int,
+        Lp: int,
+        q: int,
+    ) -> float:
+        r"""对应 ``\hat{r}_1 \cdot \hat{\nabla}_2^Y`` 的角向部分。"""
+
+        key = (l1, l2, L, l1p, l2p, q)
+        cache = self.cache_rhat_grad_12
+        if key in cache:
+            return cache[key]
+
+        value = self._angular_tensor_rhat_weighted(
+            l1,
+            l2,
+            L,
+            l1p,
+            l2p,
+            Lp,
+            q,
+            weight_fn=lambda _T1, T2: self._b_coefficient(l2, T2),
+        )
+        cache[key] = value
+        return value
+
+    def angular_tensor_rhat_grad_21(
+        self,
+        l1: int,
+        l2: int,
+        L: int,
+        l1p: int,
+        l2p: int,
+        Lp: int,
+        q: int,
+    ) -> float:
+        r"""对应 ``\hat{r}_2 \cdot \hat{\nabla}_1^Y`` 的角向部分。"""
+
+        key = (l1, l2, L, l1p, l2p, q)
+        cache = self.cache_rhat_grad_21
+        if key in cache:
+            return cache[key]
+
+        value = self._angular_tensor_rhat_weighted(
+            l1,
+            l2,
+            L,
+            l1p,
+            l2p,
+            Lp,
+            q,
+            weight_fn=lambda T1, _T2: self._b_coefficient(l1, T1),
+        )
+        cache[key] = value
+        return value
+
+    def angular_tensor_grad_grad(
+        self,
+        l1: int,
+        l2: int,
+        L: int,
+        l1p: int,
+        l2p: int,
+        Lp: int,
+        q: int,
+    ) -> float:
+        r"""对应 ``\hat{\nabla}_1^Y \cdot \hat{\nabla}_2^Y`` 的角向部分。"""
+
+        key = (l1, l2, L, l1p, l2p, q)
+        cache = self.cache_grad_grad
+        if key in cache:
+            return cache[key]
+
+        value = self._angular_tensor_rhat_weighted(
+            l1,
+            l2,
+            L,
+            l1p,
+            l2p,
+            Lp,
+            q,
+            weight_fn=lambda T1, T2: self._b_coefficient(
+                l1, T1) * self._b_coefficient(l2, T2),
+        )
         cache[key] = value
         return value
 
