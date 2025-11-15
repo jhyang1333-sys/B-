@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, Tuple, Union
+from typing import Dict, Iterable, List, Tuple, Union
 
 import numpy as np
 from scipy.sparse import coo_matrix
@@ -31,6 +31,14 @@ class _AngularComponents:
     rhat_grad_12: float
     rhat_grad_21: float
     grad_grad: float
+
+
+@dataclass(frozen=True)
+class _PrecomputedTerm:
+    corr: CorrelationTerm
+    angular: _AngularComponents
+    coeff_base: float
+    c_power: int
 
 
 @dataclass
@@ -96,925 +104,439 @@ class MatrixElementBuilder:
                         c_col = term_col.correlation_power
                         c_total = c_row + c_col
 
-                        # I-type integrals that share the same correlation power.
-                        for corr_term in self._iter_correlation_terms(c_total):
-                            q = corr_term.q
-                            ang = self._angular_components(
-                                term_row.channel, term_col.channel, q
+                        terms_c = self._precompute_terms(
+                            term_row, term_col, c_total)
+                        terms_c_minus2 = self._precompute_terms(
+                            term_row, term_col, c_total - 2)
+                        terms_c_minus1 = self._precompute_terms(
+                            term_row, term_col, c_total - 1)
+                        terms_c_plus2 = self._precompute_terms(
+                            term_row, term_col, c_total + 2)
+
+                        if (
+                            not terms_c
+                            and not terms_c_minus2
+                            and not terms_c_minus1
+                            and not terms_c_plus2
+                        ):
+                            continue
+
+                        mu = self.operators.mu
+                        M = self.operators.M
+                        pref_second = -0.5 / mu if mu != 0.0 else 0.0
+                        pref_first = -1.0 / mu if mu != 0.0 else 0.0
+                        pref_centrifugal = 0.5 / mu if mu != 0.0 else 0.0
+                        pref_cross = -0.25 / M if M != 0.0 else 0.0
+                        pref_mu_first_extra = pref_second
+                        pref_mass_first_extra = 0.5 / M if M != 0.0 else 0.0
+                        pref_mu_mix = pref_second
+                        pref_mass_mix = pref_mass_first_extra
+                        pref_mu_j = 1.0 / mu if mu != 0.0 else 0.0
+                        pref_mass_j = -1.0 / M if M != 0.0 else 0.0
+                        scalar_pref_nonzero = (
+                            pref_mu_mix != 0.0 or pref_mass_mix != 0.0
+                        )
+
+                        l1 = term_col.channel.l1
+                        l2 = term_col.channel.l2
+
+                        def integrand(point: RadialPointData) -> Tuple[float, float, float, float, float]:
+                            r1 = point.r1
+                            r2 = point.r2
+                            if r1 <= 0.0 or r2 <= 0.0:
+                                return (0.0, 0.0, 0.0, 0.0, 0.0)
+
+                            row_r1 = point.value_r1[0]
+                            row_r2 = point.value_r2[0]
+                            col_r1 = point.value_r1[1]
+                            col_r2 = point.value_r2[1]
+
+                            phi_row = row_r1 * row_r2
+                            if phi_row == 0.0:
+                                return (0.0, 0.0, 0.0, 0.0, 0.0)
+
+                            d_col_r1 = point.d1_r1[1]
+                            d_col_r2 = point.d1_r2[1]
+                            d2_col_r1 = point.d2_r1[1]
+                            d2_col_r2 = point.d2_r2[1]
+
+                            col_dr1 = d_col_r1 * col_r2
+                            col_dr2 = col_r1 * d_col_r2
+                            col_d2r1 = d2_col_r1 * col_r2
+                            col_d2r2 = col_r1 * d2_col_r2
+
+                            phi_col = col_r1 * col_r2
+
+                            measure = (r1 * r1) * (r2 * r2)
+                            potential_pref = self.operators.potential_terms(
+                                r1, r2)
+
+                            ratio_mix_r1 = (
+                                (r1 * r1 - r2 * r2) / r1 if r1 != 0.0 else 0.0
                             )
+                            ratio_mix_r2 = (
+                                (r2 * r2 - r1 * r1) / r2 if r2 != 0.0 else 0.0
+                            )
+                            ratio_cross = (
+                                (r1 * r1 + r2 * r2) / (r1 * r2)
+                                if r1 != 0.0 and r2 != 0.0
+                                else 0.0
+                            )
+                            ratio_j1 = r1 / r2 if r2 != 0.0 else 0.0
+                            ratio_j2 = r2 / r1 if r1 != 0.0 else 0.0
 
-                            def integrand(point: RadialPointData) -> Tuple[
-                                float,
-                                float,
-                                float,
-                                float,
-                                float,
-                                float,
-                                float,
-                                float,
-                                float,
-                                float,
-                                float,
-                            ]:
-                                r1 = point.r1
-                                r2 = point.r2
-                                if r1 <= 0.0 or r2 <= 0.0:
-                                    return (
-                                        0.0,
-                                        0.0,
-                                        0.0,
-                                        0.0,
-                                        0.0,
-                                        0.0,
-                                        0.0,
-                                        0.0,
-                                        0.0,
-                                        0.0,
-                                        0.0,
-                                    )
+                            derivative_product = col_dr1 * col_dr2
 
-                                (radial_factor, *_) = self._radial_factor_components(
-                                    r1, r2, c_total, q, corr_term.k
+                            total_ol = 0.0
+                            total_po = 0.0
+                            total_ki = 0.0
+                            total_ma = 0.0
+                            total_ve = 0.0
+
+                            for term in terms_c:
+                                radial_factor, _, _, _, _, _ = self._radial_factor_components(
+                                    r1, r2, term.c_power, term.corr.q, term.corr.k
                                 )
+                                if radial_factor == 0.0:
+                                    continue
 
-                                measure = (r1 * r1) * (r2 * r2)
+                                coeff = term.coeff_base
+                                ang = term.angular
+                                measure_factor = measure * radial_factor
 
-                                row_r1 = point.value_r1[0]
-                                row_r2 = point.value_r2[0]
-                                col_r1 = point.value_r1[1]
-                                col_r2 = point.value_r2[1]
+                                g1 = ang.g1
+                                if g1 != 0.0:
+                                    coeff_g1 = coeff * g1
 
-                                phi_row = row_r1 * row_r2
-                                phi_col = col_r1 * col_r2
+                                    if phi_col != 0.0:
+                                        base_overlap = measure_factor * phi_row * phi_col
+                                        total_ol += coeff_g1 * base_overlap
+                                        total_po += coeff_g1 * base_overlap * potential_pref
 
-                                if (
-                                    phi_row == 0.0
-                                    and phi_col == 0.0
-                                    and radial_factor == 0.0
-                                ):
-                                    return (
-                                        0.0,
-                                        0.0,
-                                        0.0,
-                                        0.0,
-                                        0.0,
-                                        0.0,
-                                        0.0,
-                                        0.0,
-                                        0.0,
-                                        0.0,
-                                        0.0,
-                                    )
+                                        if r1 != 0.0:
+                                            total_ki += (
+                                                coeff_g1
+                                                * pref_centrifugal
+                                                * l1
+                                                * (l1 + 1)
+                                                * measure_factor
+                                                * phi_row
+                                                * phi_col
+                                                / (r1 * r1)
+                                            )
+                                        if r2 != 0.0:
+                                            total_ki += (
+                                                coeff_g1
+                                                * pref_centrifugal
+                                                * l2
+                                                * (l2 + 1)
+                                                * measure_factor
+                                                * phi_row
+                                                * phi_col
+                                                / (r2 * r2)
+                                            )
 
-                                d_col_r1 = point.d1_r1[1]
-                                d_col_r2 = point.d1_r2[1]
-                                d2_col_r1 = point.d2_r1[1]
-                                d2_col_r2 = point.d2_r2[1]
+                                    if col_d2r1 != 0.0:
+                                        total_ki += (
+                                            coeff_g1
+                                            * pref_second
+                                            * measure_factor
+                                            * phi_row
+                                            * col_d2r1
+                                        )
+                                    if col_d2r2 != 0.0:
+                                        total_ki += (
+                                            coeff_g1
+                                            * pref_second
+                                            * measure_factor
+                                            * phi_row
+                                            * col_d2r2
+                                        )
+                                    if col_dr1 != 0.0 and r1 != 0.0:
+                                        total_ki += (
+                                            coeff_g1
+                                            * pref_first
+                                            * measure_factor
+                                            * phi_row
+                                            * col_dr1
+                                            / r1
+                                        )
+                                    if col_dr2 != 0.0 and r2 != 0.0:
+                                        total_ki += (
+                                            coeff_g1
+                                            * pref_first
+                                            * measure_factor
+                                            * phi_row
+                                            * col_dr2
+                                            / r2
+                                        )
 
-                                col_dr1 = d_col_r1 * col_r2
-                                col_dr2 = col_r1 * d_col_r2
-                                col_d2r1 = d2_col_r1 * col_r2
-                                col_d2r2 = col_r1 * d2_col_r2
+                                    if c_col != 0 and (col_dr1 != 0.0 or col_dr2 != 0.0):
+                                        factor_c = coeff_g1 * c_col
+                                        if col_dr1 != 0.0 and r1 != 0.0:
+                                            total_ki += (
+                                                factor_c
+                                                * pref_mu_first_extra
+                                                * measure_factor
+                                                * phi_row
+                                                * col_dr1
+                                                / r1
+                                            )
+                                            total_ma += (
+                                                factor_c
+                                                * pref_mass_first_extra
+                                                * measure_factor
+                                                * phi_row
+                                                * col_dr1
+                                                / r1
+                                            )
+                                        if col_dr2 != 0.0 and r2 != 0.0:
+                                            total_ki += (
+                                                factor_c
+                                                * pref_mu_first_extra
+                                                * measure_factor
+                                                * phi_row
+                                                * col_dr2
+                                                / r2
+                                            )
+                                            total_ma += (
+                                                factor_c
+                                                * pref_mass_first_extra
+                                                * measure_factor
+                                                * phi_row
+                                                * col_dr2
+                                                / r2
+                                            )
 
-                                overlap_val = measure * radial_factor * phi_row * phi_col
-                                potential_val = overlap_val * self.operators.potential_terms(
-                                    r1, r2
-                                )
+                                    if (
+                                        pref_cross != 0.0
+                                        and derivative_product != 0.0
+                                        and ratio_cross != 0.0
+                                    ):
+                                        total_ma += (
+                                            coeff_g1
+                                            * pref_cross
+                                            * measure_factor
+                                            * phi_row
+                                            * derivative_product
+                                            * ratio_cross
+                                        )
 
-                                kin_second_r1 = measure * radial_factor * phi_row * col_d2r1
-                                kin_second_r2 = measure * radial_factor * phi_row * col_d2r2
-
-                                kin_first_r1 = 0.0
-                                if r1 > 0.0:
-                                    kin_first_r1 = (
-                                        measure
-                                        * radial_factor
+                                if ang.rhat_grad_12 != 0.0 and col_dr1 != 0.0 and r2 != 0.0:
+                                    total_ma += (
+                                        coeff
+                                        * ang.rhat_grad_12
+                                        * (-1.0 / M if M != 0.0 else 0.0)
+                                        * measure_factor
                                         * phi_row
                                         * col_dr1
-                                        / r1
-                                    )
-
-                                kin_first_r2 = 0.0
-                                if r2 > 0.0:
-                                    kin_first_r2 = (
-                                        measure
-                                        * radial_factor
-                                        * phi_row
-                                        * col_dr2
                                         / r2
                                     )
 
-                                centrifugal_r1 = 0.0
-                                if r1 > 0.0:
-                                    centrifugal_r1 = (
-                                        measure
-                                        * radial_factor
-                                        * phi_row
-                                        * phi_col
-                                        / (r1 * r1)
-                                    )
-
-                                centrifugal_r2 = 0.0
-                                if r2 > 0.0:
-                                    centrifugal_r2 = (
-                                        measure
-                                        * radial_factor
-                                        * phi_row
-                                        * phi_col
-                                        / (r2 * r2)
-                                    )
-
-                                j1_term1 = 0.0
-                                if r2 > 0.0:
-                                    j1_term1 = (
-                                        measure
-                                        * radial_factor
-                                        * phi_row
-                                        * col_dr1
-                                        / r2
-                                    )
-
-                                j2_term1 = 0.0
-                                if r1 > 0.0:
-                                    j2_term1 = (
-                                        measure
-                                        * radial_factor
+                                if ang.rhat_grad_21 != 0.0 and col_dr2 != 0.0 and r1 != 0.0:
+                                    total_ma += (
+                                        coeff
+                                        * ang.rhat_grad_21
+                                        * (-1.0 / M if M != 0.0 else 0.0)
+                                        * measure_factor
                                         * phi_row
                                         * col_dr2
                                         / r1
                                     )
 
-                                j3_term = 0.0
-                                if r1 > 0.0 and r2 > 0.0:
-                                    j3_term = (
-                                        measure
-                                        * radial_factor
+                                if ang.grad_grad != 0.0 and phi_col != 0.0 and r1 != 0.0 and r2 != 0.0:
+                                    total_ma += (
+                                        coeff
+                                        * ang.grad_grad
+                                        * (-1.0 / M if M != 0.0 else 0.0)
+                                        * measure_factor
                                         * phi_row
                                         * phi_col
                                         / (r1 * r2)
                                     )
 
-                                return (
-                                    overlap_val,
-                                    potential_val,
-                                    kin_second_r1,
-                                    kin_first_r1,
-                                    kin_second_r2,
-                                    kin_first_r2,
-                                    centrifugal_r1,
-                                    centrifugal_r2,
-                                    j1_term1,
-                                    j2_term1,
-                                    j3_term,
-                                )
-
-                            (
-                                overlap_val,
-                                potential_val,
-                                kin_second_r1,
-                                kin_first_r1,
-                                kin_second_r2,
-                                kin_first_r2,
-                                centrifugal_r1,
-                                centrifugal_r2,
-                                j1_term1,
-                                j2_term1,
-                                j3_term,
-                            ) = quadrature.integrate(
-                                term_row.radial_indices,
-                                term_col.radial_indices,
-                                integrand,
-                            )
-
-                            coeff_base = (
-                                term_row.coeff
-                                * term_col.coeff
-                                * corr_term.coefficient
-                            )
-
-                            g1 = ang.g1
-                            if g1 != 0.0:
-                                total_overlap += coeff_base * g1 * overlap_val
-                                total_potential += coeff_base * g1 * potential_val
-
-                                pure_second = -0.5 / self.operators.mu * (
-                                    kin_second_r1 + kin_second_r2
-                                )
-                                pure_first = -1.0 / self.operators.mu * (
-                                    kin_first_r1 + kin_first_r2
-                                )
-                                centrifugal = (
-                                    0.5
-                                    / self.operators.mu
-                                    * (
-                                        term_col.channel.l1
-                                        * (term_col.channel.l1 + 1)
-                                        * centrifugal_r1
-                                        + term_col.channel.l2
-                                        * (term_col.channel.l2 + 1)
-                                        * centrifugal_r2
+                            if c_col != 0:
+                                for term in terms_c_minus2:
+                                    radial_factor, _, _, _, _, _ = self._radial_factor_components(
+                                        r1, r2, term.c_power, term.corr.q, term.corr.k
                                     )
-                                )
-
-                                kinetic_contrib = pure_second + pure_first + centrifugal
-                                if kinetic_contrib != 0.0:
-                                    total_kinetic_mu += coeff_base * g1 * kinetic_contrib
-
-                                if c_col != 0:
-                                    pref_mu = -0.5 / self.operators.mu
-                                    pref_mass = 0.5 / self.operators.M
-                                    factor = coeff_base * g1 * c_col
-                                    if kin_first_r1 != 0.0:
-                                        if pref_mu != 0.0:
-                                            total_kinetic_mu += factor * pref_mu * kin_first_r1
-                                        if pref_mass != 0.0:
-                                            total_mass += factor * pref_mass * kin_first_r1
-                                    if kin_first_r2 != 0.0:
-                                        if pref_mu != 0.0:
-                                            total_kinetic_mu += factor * pref_mu * kin_first_r2
-                                        if pref_mass != 0.0:
-                                            total_mass += factor * pref_mass * kin_first_r2
-
-                                pref_cross = -0.25 / self.operators.M
-
-                                # Mixed ∂_{r1}∂_{r2} contribution using c_total.
-                                if pref_cross != 0.0:
-
-                                    def integrand_cross(point: RadialPointData) -> Tuple[float]:
-                                        r1 = point.r1
-                                        r2 = point.r2
-                                        if r1 <= 0.0 or r2 <= 0.0:
-                                            return (0.0,)
-
-                                        (radial_factor, *_) = self._radial_factor_components(
-                                            r1, r2, c_total, q, corr_term.k
-                                        )
-                                        if radial_factor == 0.0:
-                                            return (0.0,)
-
-                                        row_r1 = point.value_r1[0]
-                                        row_r2 = point.value_r2[0]
-                                        phi_row = row_r1 * row_r2
-                                        if phi_row == 0.0:
-                                            return (0.0,)
-
-                                        d_col_r1 = point.d1_r1[1]
-                                        d_col_r2 = point.d1_r2[1]
-                                        derivative_product = d_col_r1 * d_col_r2
-                                        if derivative_product == 0.0:
-                                            return (0.0,)
-
-                                        denom = r1 * r2
-                                        if denom == 0.0:
-                                            return (0.0,)
-
-                                        ratio = (r1 * r1 + r2 * r2) / denom
-                                        measure = (r1 * r1) * (r2 * r2)
-                                        return (
-                                            measure
-                                            * radial_factor
-                                            * phi_row
-                                            * derivative_product
-                                            * ratio,
-                                        )
-
-                                    (cross_base,) = quadrature.integrate(
-                                        term_row.radial_indices,
-                                        term_col.radial_indices,
-                                        integrand_cross,
-                                    )
-
-                                    if cross_base != 0.0:
-                                        total_mass += coeff_base * g1 * pref_cross * cross_base
-
-                            if ang.rhat_grad_12 != 0.0 and j1_term1 != 0.0:
-                                total_mass += (
-                                    coeff_base
-                                    * ang.rhat_grad_12
-                                    * (-1.0 / self.operators.M)
-                                    * j1_term1
-                                )
-
-                            if ang.rhat_grad_21 != 0.0 and j2_term1 != 0.0:
-                                total_mass += (
-                                    coeff_base
-                                    * ang.rhat_grad_21
-                                    * (-1.0 / self.operators.M)
-                                    * j2_term1
-                                )
-
-                            if ang.grad_grad != 0.0 and j3_term != 0.0:
-                                total_mass += (
-                                    coeff_base
-                                    * ang.grad_grad
-                                    * (-1.0 / self.operators.M)
-                                    * j3_term
-                                )
-
-                        pref_mu_mix = -0.5 / self.operators.mu
-                        pref_mass_mix = 0.5 / self.operators.M
-
-                        # Terms stemming from ∂_{ri}∂_{r12} acting on the correlation factor.
-
-                        if c_col != 0:
-                            c_shift_mix = c_total - 2
-                            scalar_pref_nonzero = (
-                                pref_mu_mix != 0.0 or pref_mass_mix != 0.0
-                            )
-                            if c_shift_mix >= -1:
-                                pref_mu_j = 1.0 / self.operators.mu
-                                pref_mass_j = -1.0 / self.operators.M
-                                for corr_term_mix in self._iter_correlation_terms(c_shift_mix):
-                                    q_mix = corr_term_mix.q
-                                    ang_mix = self._angular_components(
-                                        term_row.channel, term_col.channel, q_mix
-                                    )
-
-                                    coeff_base_mix = (
-                                        term_row.coeff
-                                        * term_col.coeff
-                                        * corr_term_mix.coefficient
-                                    )
-
-                                    g1_mix = ang_mix.g1
-                                    has_scalar_pref = (
-                                        g1_mix != 0.0 and scalar_pref_nonzero
-                                    )
-
-                                    if has_scalar_pref:
-
-                                        def integrand_mix_r1(point: RadialPointData) -> Tuple[float]:
-                                            r1 = point.r1
-                                            r2 = point.r2
-                                            if r1 <= 0.0 or r2 <= 0.0:
-                                                return (0.0,)
-
-                                            (radial_factor, *_) = self._radial_factor_components(
-                                                r1, r2, c_shift_mix, q_mix, corr_term_mix.k
-                                            )
-                                            if radial_factor == 0.0:
-                                                return (0.0,)
-
-                                            row_r1 = point.value_r1[0]
-                                            row_r2 = point.value_r2[0]
-                                            phi_row = row_r1 * row_r2
-                                            if phi_row == 0.0:
-                                                return (0.0,)
-
-                                            d_col_r1 = point.d1_r1[1]
-                                            col_r2 = point.value_r2[1]
-                                            col_dr1 = d_col_r1 * col_r2
-                                            if col_dr1 == 0.0:
-                                                return (0.0,)
-
-                                            ratio = (r1 * r1 - r2 * r2) / \
-                                                r1 if r1 != 0.0 else 0.0
-                                            measure = (r1 * r1) * (r2 * r2)
-                                            return (
-                                                measure
-                                                * radial_factor
-                                                * phi_row
-                                                * col_dr1
-                                                * ratio,
-                                            )
-
-                                        (mix_r1_val,) = quadrature.integrate(
-                                            term_row.radial_indices,
-                                            term_col.radial_indices,
-                                            integrand_mix_r1,
-                                        )
-
-                                        if mix_r1_val != 0.0:
-                                            factor = coeff_base_mix * c_col
-                                            if pref_mu_mix != 0.0:
-                                                total_kinetic_mu += (
-                                                    factor
-                                                    * pref_mu_mix
-                                                    * g1_mix
-                                                    * mix_r1_val
-                                                )
-                                            if pref_mass_mix != 0.0:
-                                                total_mass += (
-                                                    factor
-                                                    * pref_mass_mix
-                                                    * g1_mix
-                                                    * mix_r1_val
-                                                )
-
-                                    if ang_mix.rhat_grad_12 != 0.0 and (
-                                        pref_mu_j != 0.0 or pref_mass_j != 0.0
-                                    ):
-
-                                        def integrand_j1_term2(point: RadialPointData) -> Tuple[float]:
-                                            r1 = point.r1
-                                            r2 = point.r2
-                                            if r1 <= 0.0 or r2 <= 0.0:
-                                                return (0.0,)
-
-                                            (radial_factor, *_) = self._radial_factor_components(
-                                                r1, r2, c_shift_mix, q_mix, corr_term_mix.k
-                                            )
-                                            if radial_factor == 0.0 or r2 == 0.0:
-                                                return (0.0,)
-
-                                            row_r1 = point.value_r1[0]
-                                            row_r2 = point.value_r2[0]
-                                            phi_row = row_r1 * row_r2
-                                            if phi_row == 0.0:
-                                                return (0.0,)
-
-                                            col_r1 = point.value_r1[1]
-                                            col_r2 = point.value_r2[1]
-                                            phi_col = col_r1 * col_r2
-                                            if phi_col == 0.0:
-                                                return (0.0,)
-
-                                            measure = (r1 * r1) * (r2 * r2)
-                                            return (
-                                                measure
-                                                * radial_factor
-                                                * phi_row
-                                                * phi_col
-                                                * (r1 / r2),
-                                            )
-
-                                        (j1_term2_val,) = quadrature.integrate(
-                                            term_row.radial_indices,
-                                            term_col.radial_indices,
-                                            integrand_j1_term2,
-                                        )
-
-                                        if j1_term2_val != 0.0:
-                                            factor = coeff_base_mix * c_col
-                                            if pref_mu_j != 0.0:
-                                                total_kinetic_mu += (
-                                                    factor
-                                                    * pref_mu_j
-                                                    * ang_mix.rhat_grad_12
-                                                    * j1_term2_val
-                                                )
-                                            if pref_mass_j != 0.0:
-                                                total_mass += (
-                                                    factor
-                                                    * pref_mass_j
-                                                    * ang_mix.rhat_grad_12
-                                                    * j1_term2_val
-                                                )
-
-                                    if has_scalar_pref:
-
-                                        def integrand_mix_r2(point: RadialPointData) -> Tuple[float]:
-                                            r1 = point.r1
-                                            r2 = point.r2
-                                            if r1 <= 0.0 or r2 <= 0.0:
-                                                return (0.0,)
-
-                                            (radial_factor, *_) = self._radial_factor_components(
-                                                r1, r2, c_shift_mix, q_mix, corr_term_mix.k
-                                            )
-                                            if radial_factor == 0.0:
-                                                return (0.0,)
-
-                                            row_r1 = point.value_r1[0]
-                                            row_r2 = point.value_r2[0]
-                                            phi_row = row_r1 * row_r2
-                                            if phi_row == 0.0:
-                                                return (0.0,)
-
-                                            col_r1 = point.value_r1[1]
-                                            d_col_r2 = point.d1_r2[1]
-                                            col_dr2 = col_r1 * d_col_r2
-                                            if col_dr2 == 0.0:
-                                                return (0.0,)
-
-                                            ratio = (r2 * r2 - r1 * r1) / \
-                                                r2 if r2 != 0.0 else 0.0
-                                            measure = (r1 * r1) * (r2 * r2)
-                                            return (
-                                                measure
-                                                * radial_factor
-                                                * phi_row
-                                                * col_dr2
-                                                * ratio,
-                                            )
-
-                                        (mix_r2_val,) = quadrature.integrate(
-                                            term_row.radial_indices,
-                                            term_col.radial_indices,
-                                            integrand_mix_r2,
-                                        )
-
-                                        if mix_r2_val != 0.0:
-                                            factor = coeff_base_mix * c_col
-                                            if pref_mu_mix != 0.0:
-                                                total_kinetic_mu += (
-                                                    factor
-                                                    * pref_mu_mix
-                                                    * g1_mix
-                                                    * mix_r2_val
-                                                )
-                                            if pref_mass_mix != 0.0:
-                                                total_mass += (
-                                                    factor
-                                                    * pref_mass_mix
-                                                    * g1_mix
-                                                    * mix_r2_val
-                                                )
-
-                                    if ang_mix.rhat_grad_21 != 0.0 and (
-                                        pref_mu_j != 0.0 or pref_mass_j != 0.0
-                                    ):
-
-                                        def integrand_j2_term2(point: RadialPointData) -> Tuple[float]:
-                                            r1 = point.r1
-                                            r2 = point.r2
-                                            if r1 <= 0.0 or r2 <= 0.0:
-                                                return (0.0,)
-
-                                            (radial_factor, *_) = self._radial_factor_components(
-                                                r1, r2, c_shift_mix, q_mix, corr_term_mix.k
-                                            )
-                                            if radial_factor == 0.0 or r1 == 0.0:
-                                                return (0.0,)
-
-                                            row_r1 = point.value_r1[0]
-                                            row_r2 = point.value_r2[0]
-                                            phi_row = row_r1 * row_r2
-                                            if phi_row == 0.0:
-                                                return (0.0,)
-
-                                            col_r1 = point.value_r1[1]
-                                            col_r2 = point.value_r2[1]
-                                            phi_col = col_r1 * col_r2
-                                            if phi_col == 0.0:
-                                                return (0.0,)
-
-                                            measure = (r1 * r1) * (r2 * r2)
-                                            return (
-                                                measure
-                                                * radial_factor
-                                                * phi_row
-                                                * phi_col
-                                                * (r2 / r1),
-                                            )
-
-                                        (j2_term2_val,) = quadrature.integrate(
-                                            term_row.radial_indices,
-                                            term_col.radial_indices,
-                                            integrand_j2_term2,
-                                        )
-
-                                        if j2_term2_val != 0.0:
-                                            factor = coeff_base_mix * c_col
-                                            if pref_mu_j != 0.0:
-                                                total_kinetic_mu += (
-                                                    factor
-                                                    * pref_mu_j
-                                                    * ang_mix.rhat_grad_21
-                                                    * j2_term2_val
-                                                )
-                                            if pref_mass_j != 0.0:
-                                                total_mass += (
-                                                    factor
-                                                    * pref_mass_j
-                                                    * ang_mix.rhat_grad_21
-                                                    * j2_term2_val
-                                                )
-
-                            if scalar_pref_nonzero and c_total >= -1:
-                                for corr_term_mix_zero in self._iter_correlation_terms(c_total):
-                                    q_mix_zero = corr_term_mix_zero.q
-                                    ang_mix_zero = self._angular_components(
-                                        term_row.channel, term_col.channel, q_mix_zero
-                                    )
-
-                                    g1_mix_zero = ang_mix_zero.g1
-                                    if g1_mix_zero == 0.0:
+                                    if radial_factor == 0.0:
                                         continue
 
-                                    coeff_base_zero = (
-                                        term_row.coeff
-                                        * term_col.coeff
-                                        * corr_term_mix_zero.coefficient
-                                    )
-                                    factor_zero = coeff_base_zero * c_col
+                                    coeff = term.coeff_base * c_col
+                                    ang = term.angular
+                                    measure_factor = measure * radial_factor
 
-                                    def integrand_mix_r1_zero(point: RadialPointData) -> Tuple[float]:
-                                        r1 = point.r1
-                                        r2 = point.r2
-                                        if r1 <= 0.0 or r2 <= 0.0 or r1 == 0.0:
-                                            return (0.0,)
+                                    if ang.g1 != 0.0 and scalar_pref_nonzero:
+                                        if col_dr1 != 0.0 and ratio_mix_r1 != 0.0:
+                                            base_mix_r1 = (
+                                                measure_factor
+                                                * phi_row
+                                                * col_dr1
+                                                * ratio_mix_r1
+                                            )
+                                            total_ki += coeff * ang.g1 * pref_mu_mix * base_mix_r1
+                                            total_ma += coeff * ang.g1 * pref_mass_mix * base_mix_r1
 
-                                        (radial_factor, *_) = self._radial_factor_components(
-                                            r1, r2, c_total, q_mix_zero, corr_term_mix_zero.k
+                                        if col_dr2 != 0.0 and ratio_mix_r2 != 0.0:
+                                            base_mix_r2 = (
+                                                measure_factor
+                                                * phi_row
+                                                * col_dr2
+                                                * ratio_mix_r2
+                                            )
+                                            total_ki += coeff * ang.g1 * pref_mu_mix * base_mix_r2
+                                            total_ma += coeff * ang.g1 * pref_mass_mix * base_mix_r2
+
+                                    if (
+                                        (ang.rhat_grad_12 !=
+                                         0.0 or ang.rhat_grad_21 != 0.0)
+                                        and phi_col != 0.0
+                                    ):
+                                        if ang.rhat_grad_12 != 0.0 and ratio_j1 != 0.0:
+                                            base_j1 = (
+                                                measure_factor
+                                                * phi_row
+                                                * phi_col
+                                                * ratio_j1
+                                            )
+                                            total_ki += coeff * pref_mu_j * ang.rhat_grad_12 * base_j1
+                                            total_ma += coeff * pref_mass_j * ang.rhat_grad_12 * base_j1
+
+                                        if ang.rhat_grad_21 != 0.0 and ratio_j2 != 0.0:
+                                            base_j2 = (
+                                                measure_factor
+                                                * phi_row
+                                                * phi_col
+                                                * ratio_j2
+                                            )
+                                            total_ki += coeff * pref_mu_j * ang.rhat_grad_21 * base_j2
+                                            total_ma += coeff * pref_mass_j * ang.rhat_grad_21 * base_j2
+
+                                    if ang.g1 != 0.0 and c_col > 0 and phi_col != 0.0:
+                                        base_r12 = measure_factor * phi_row * phi_col
+                                        coeff_mu = (-2.0 / mu) * \
+                                            c_col if mu != 0.0 else 0.0
+                                        coeff_mass = (2.0 / M) * \
+                                            c_col if M != 0.0 else 0.0
+                                        if c_col >= 2:
+                                            if mu != 0.0:
+                                                coeff_mu += (
+                                                    -1.0
+                                                    / mu
+                                                    * c_col
+                                                    * (c_col - 1)
+                                                )
+                                            if M != 0.0:
+                                                coeff_mass += (
+                                                    1.0
+                                                    / M
+                                                    * c_col
+                                                    * (c_col - 1)
+                                                )
+                                        if coeff_mu != 0.0:
+                                            total_ki += coeff * ang.g1 * coeff_mu * base_r12
+                                        if coeff_mass != 0.0:
+                                            total_ma += coeff * ang.g1 * coeff_mass * base_r12
+
+                                if scalar_pref_nonzero and terms_c:
+                                    for term in terms_c:
+                                        radial_factor, _, _, _, _, _ = self._radial_factor_components(
+                                            r1, r2, term.c_power, term.corr.q, term.corr.k
                                         )
                                         if radial_factor == 0.0:
-                                            return (0.0,)
+                                            continue
 
-                                        row_r1 = point.value_r1[0]
-                                        row_r2 = point.value_r2[0]
-                                        phi_row = row_r1 * row_r2
-                                        if phi_row == 0.0:
-                                            return (0.0,)
+                                        ang = term.angular
+                                        if ang.g1 == 0.0:
+                                            continue
 
-                                        d_col_r1 = point.d1_r1[1]
-                                        col_r2 = point.value_r2[1]
-                                        col_dr1 = d_col_r1 * col_r2
-                                        if col_dr1 == 0.0:
-                                            return (0.0,)
+                                        coeff = term.coeff_base * c_col
+                                        measure_factor = measure * radial_factor
 
-                                        measure = (r1 * r1) * (r2 * r2)
-                                        return (
-                                            measure
-                                            * radial_factor
-                                            * phi_row
-                                            * col_dr1
-                                            / r1,
-                                        )
-
-                                    (mix_r1_zero,) = quadrature.integrate(
-                                        term_row.radial_indices,
-                                        term_col.radial_indices,
-                                        integrand_mix_r1_zero,
-                                    )
-
-                                    if mix_r1_zero != 0.0:
-                                        if pref_mu_mix != 0.0:
-                                            total_kinetic_mu += (
-                                                factor_zero
-                                                * pref_mu_mix
-                                                * g1_mix_zero
-                                                * mix_r1_zero
+                                        if col_dr1 != 0.0 and r1 != 0.0:
+                                            base_mix_r1_zero = (
+                                                measure_factor
+                                                * phi_row
+                                                * col_dr1
+                                                / r1
                                             )
-                                        if pref_mass_mix != 0.0:
-                                            total_mass += (
-                                                factor_zero
-                                                * pref_mass_mix
-                                                * g1_mix_zero
-                                                * mix_r1_zero
+                                            total_ki += coeff * ang.g1 * pref_mu_mix * base_mix_r1_zero
+                                            total_ma += coeff * ang.g1 * pref_mass_mix * base_mix_r1_zero
+
+                                        if col_dr2 != 0.0 and r2 != 0.0:
+                                            base_mix_r2_zero = (
+                                                measure_factor
+                                                * phi_row
+                                                * col_dr2
+                                                / r2
                                             )
+                                            total_ki += coeff * ang.g1 * pref_mu_mix * base_mix_r2_zero
+                                            total_ma += coeff * ang.g1 * pref_mass_mix * base_mix_r2_zero
 
-                                    def integrand_mix_r2_zero(point: RadialPointData) -> Tuple[float]:
-                                        r1 = point.r1
-                                        r2 = point.r2
-                                        if r1 <= 0.0 or r2 <= 0.0 or r2 == 0.0:
-                                            return (0.0,)
-
-                                        (radial_factor, *_) = self._radial_factor_components(
-                                            r1, r2, c_total, q_mix_zero, corr_term_mix_zero.k
-                                        )
-                                        if radial_factor == 0.0:
-                                            return (0.0,)
-
-                                        row_r1 = point.value_r1[0]
-                                        row_r2 = point.value_r2[0]
-                                        phi_row = row_r1 * row_r2
-                                        if phi_row == 0.0:
-                                            return (0.0,)
-
-                                        col_r1 = point.value_r1[1]
-                                        d_col_r2 = point.d1_r2[1]
-                                        col_dr2 = col_r1 * d_col_r2
-                                        if col_dr2 == 0.0:
-                                            return (0.0,)
-
-                                        measure = (r1 * r1) * (r2 * r2)
-                                        return (
-                                            measure
-                                            * radial_factor
-                                            * phi_row
-                                            * col_dr2
-                                            / r2,
-                                        )
-
-                                    (mix_r2_zero,) = quadrature.integrate(
-                                        term_row.radial_indices,
-                                        term_col.radial_indices,
-                                        integrand_mix_r2_zero,
-                                    )
-
-                                    if mix_r2_zero != 0.0:
-                                        if pref_mu_mix != 0.0:
-                                            total_kinetic_mu += (
-                                                factor_zero
-                                                * pref_mu_mix
-                                                * g1_mix_zero
-                                                * mix_r2_zero
-                                            )
-                                        if pref_mass_mix != 0.0:
-                                            total_mass += (
-                                                factor_zero
-                                                * pref_mass_mix
-                                                * g1_mix_zero
-                                                * mix_r2_zero
-                                            )
-
-                        c_shift_r12 = c_total - 2
-                        # Pure r12-derivative terms after lowering c_total.
-                        if c_shift_r12 >= -1 and c_col > 0:
-                            for corr_term_r12 in self._iter_correlation_terms(c_shift_r12):
-                                q_r12 = corr_term_r12.q
-                                ang_r12 = self._angular_components(
-                                    term_row.channel, term_col.channel, q_r12
+                            for term in terms_c_plus2:
+                                radial_factor, _, _, _, _, _ = self._radial_factor_components(
+                                    r1, r2, term.c_power, term.corr.q, term.corr.k
                                 )
-
-                                def integrand_r12(point: RadialPointData) -> Tuple[float]:
-                                    r1 = point.r1
-                                    r2 = point.r2
-                                    if r1 <= 0.0 or r2 <= 0.0:
-                                        return (0.0,)
-
-                                    phi_row = point.value_r1[0] * \
-                                        point.value_r2[0]
-                                    phi_col = point.value_r1[1] * \
-                                        point.value_r2[1]
-                                    if phi_row == 0.0 or phi_col == 0.0:
-                                        return (0.0,)
-
-                                    (radial_factor, *_) = self._radial_factor_components(
-                                        r1, r2, c_shift_r12, q_r12, corr_term_r12.k
-                                    )
-                                    if radial_factor == 0.0:
-                                        return (0.0,)
-
-                                    measure = (r1 * r1) * (r2 * r2)
-                                    return (
-                                        measure * radial_factor * phi_row * phi_col,
-                                    )
-
-                                (integral_r12,) = quadrature.integrate(
-                                    term_row.radial_indices,
-                                    term_col.radial_indices,
-                                    integrand_r12,
-                                )
-
-                                if integral_r12 == 0.0:
+                                if (
+                                    radial_factor == 0.0
+                                    or term.angular.g1 == 0.0
+                                    or derivative_product == 0.0
+                                    or r1 == 0.0
+                                    or r2 == 0.0
+                                ):
                                     continue
 
-                                coeff_base_r12 = (
-                                    term_row.coeff
-                                    * term_col.coeff
-                                    * corr_term_r12.coefficient
+                                measure_factor = measure * radial_factor
+                                total_ma += (
+                                    term.coeff_base
+                                    * term.angular.g1
+                                    * pref_cross
+                                    * measure_factor
+                                    * phi_row
+                                    * derivative_product
+                                    * (-1.0 / (r1 * r2))
                                 )
 
-                                g1_r12 = ang_r12.g1
-                                if g1_r12 == 0.0:
+                            for term in terms_c_minus1:
+                                radial_factor, _, _, _, _, _ = self._radial_factor_components(
+                                    r1, r2, term.c_power, term.corr.q, term.corr.k
+                                )
+                                if (
+                                    radial_factor == 0.0
+                                    or term.angular.g1 == 0.0
+                                    or phi_col == 0.0
+                                ):
                                     continue
 
-                                coeff_mu = 0.0
-                                coeff_mass = 0.0
-                                if c_col >= 2:
-                                    coeff_mu += (
-                                        -1.0
-                                        / self.operators.mu
-                                        * c_col
-                                        * (c_col - 1)
-                                    )
-                                    coeff_mass += (
-                                        1.0
-                                        / self.operators.M
-                                        * c_col
-                                        * (c_col - 1)
-                                    )
-                                coeff_mu += (
-                                    -2.0 / self.operators.mu * c_col
-                                )
-                                coeff_mass += (
-                                    2.0 / self.operators.M * c_col
+                                total_ve += (
+                                    term.coeff_base
+                                    * term.angular.g1
+                                    * measure
+                                    * radial_factor
+                                    * phi_row
+                                    * phi_col
                                 )
 
-                                if coeff_mu != 0.0:
-                                    total_kinetic_mu += (
-                                        coeff_base_r12
-                                        * g1_r12
-                                        * coeff_mu
-                                        * integral_r12
-                                    )
-                                if coeff_mass != 0.0:
-                                    total_mass += (
-                                        coeff_base_r12
-                                        * g1_r12
-                                        * coeff_mass
-                                        * integral_r12
-                                    )
+                            return total_ol, total_po, total_ki, total_ma, total_ve
 
-                        c_plus = c_total + 2
-                        # Remaining part of ∂_{r1}∂_{r2} that raises the correlation power.
-                        if c_plus >= -1:
-                            for corr_term_plus in self._iter_correlation_terms(c_plus):
-                                q_plus = corr_term_plus.q
-                                ang_plus = self._angular_components(
-                                    term_row.channel, term_col.channel, q_plus
-                                )
+                        (
+                            overlap_val,
+                            potential_val,
+                            kinetic_val,
+                            mass_val,
+                            vee_val,
+                        ) = quadrature.integrate(
+                            term_row.radial_indices,
+                            term_col.radial_indices,
+                            integrand,
+                        )
 
-                                def integrand_cross_plus(point: RadialPointData) -> Tuple[float]:
-                                    r1 = point.r1
-                                    r2 = point.r2
-                                    if r1 <= 0.0 or r2 <= 0.0:
-                                        return (0.0,)
-
-                                    (radial_factor, *_) = self._radial_factor_components(
-                                        r1, r2, c_plus, q_plus, corr_term_plus.k
-                                    )
-                                    if radial_factor == 0.0:
-                                        return (0.0,)
-
-                                    row_r1 = point.value_r1[0]
-                                    row_r2 = point.value_r2[0]
-                                    phi_row = row_r1 * row_r2
-                                    if phi_row == 0.0:
-                                        return (0.0,)
-
-                                    d_col_r1 = point.d1_r1[1]
-                                    d_col_r2 = point.d1_r2[1]
-                                    derivative_product = d_col_r1 * d_col_r2
-                                    if derivative_product == 0.0 or r1 == 0.0 or r2 == 0.0:
-                                        return (0.0,)
-
-                                    measure = (r1 * r1) * (r2 * r2)
-                                    return (
-                                        measure
-                                        * radial_factor
-                                        * phi_row
-                                        * derivative_product
-                                        * (-1.0 / (r1 * r2)),
-                                    )
-
-                                (cross_plus_val,) = quadrature.integrate(
-                                    term_row.radial_indices,
-                                    term_col.radial_indices,
-                                    integrand_cross_plus,
-                                )
-
-                                if cross_plus_val == 0.0:
-                                    continue
-
-                                coeff_base_plus = (
-                                    term_row.coeff
-                                    * term_col.coeff
-                                    * corr_term_plus.coefficient
-                                )
-
-                                g1_plus = ang_plus.g1
-                                if g1_plus == 0.0:
-                                    continue
-
-                                total_mass += (
-                                    coeff_base_plus
-                                    * g1_plus
-                                    * (-0.25 / self.operators.M)
-                                    * cross_plus_val
-                                )
-
-                        c_vee = c_total - 1
-                        if c_vee >= -1:
-                            for corr_term_vee in self._iter_correlation_terms(c_vee):
-                                q_vee = corr_term_vee.q
-                                ang_vee = self._angular_components(
-                                    term_row.channel, term_col.channel, q_vee
-                                )
-                                if ang_vee.g1 == 0.0:
-                                    continue
-
-                                def integrand_vee(point: RadialPointData) -> Tuple[float]:
-                                    r1 = point.r1
-                                    r2 = point.r2
-                                    if r1 <= 0.0 or r2 <= 0.0:
-                                        return (0.0,)
-
-                                    phi_row = point.value_r1[0] * \
-                                        point.value_r2[0]
-                                    phi_col = point.value_r1[1] * \
-                                        point.value_r2[1]
-                                    if phi_row == 0.0 or phi_col == 0.0:
-                                        return (0.0,)
-
-                                    (radial_factor, *_) = self._radial_factor_components(
-                                        r1, r2, c_vee, q_vee, corr_term_vee.k
-                                    )
-                                    if radial_factor == 0.0:
-                                        return (0.0,)
-
-                                    measure = (r1 * r1) * (r2 * r2)
-                                    return (
-                                        measure * radial_factor * phi_row * phi_col,
-                                    )
-
-                                (integral_vee,) = quadrature.integrate(
-                                    term_row.radial_indices,
-                                    term_col.radial_indices,
-                                    integrand_vee,
-                                )
-
-                                if integral_vee == 0.0:
-                                    continue
-
-                                coeff_base_vee = (
-                                    term_row.coeff
-                                    * term_col.coeff
-                                    * corr_term_vee.coefficient
-                                )
-                                total_vee += coeff_base_vee * ang_vee.g1 * integral_vee
+                        total_overlap += overlap_val
+                        total_potential += potential_val
+                        total_kinetic_mu += kinetic_val
+                        total_mass += mass_val
+                        total_vee += vee_val
 
                 potential_total = total_potential + total_vee
                 overlap_entries[(row, col)] = total_overlap
@@ -1116,6 +638,45 @@ class MatrixElementBuilder:
         if key not in cache:
             cache[key] = tuple(self.correlation.iter_terms(c_total))
         return cache[key]
+
+    def _precompute_terms(
+        self,
+        term_row: _BasisTerm,
+        term_col: _BasisTerm,
+        c_power: int,
+    ) -> Tuple[_PrecomputedTerm, ...]:
+        if c_power < -1:
+            return ()
+
+        terms: List[_PrecomputedTerm] = []
+        for corr_term in self._iter_correlation_terms(c_power):
+            angular = self._angular_components(
+                term_row.channel,
+                term_col.channel,
+                corr_term.q,
+            )
+            coeff_base = (
+                term_row.coeff
+                * term_col.coeff
+                * corr_term.coefficient
+            )
+            if coeff_base == 0.0 and (
+                angular.g1 == 0.0
+                and angular.rhat_grad_12 == 0.0
+                and angular.rhat_grad_21 == 0.0
+                and angular.grad_grad == 0.0
+            ):
+                continue
+            terms.append(
+                _PrecomputedTerm(
+                    corr=corr_term,
+                    angular=angular,
+                    coeff_base=coeff_base,
+                    c_power=c_power,
+                )
+            )
+
+        return tuple(terms)
 
     @staticmethod
     def _safe_power(base: float, exponent: int) -> float:

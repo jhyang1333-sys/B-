@@ -41,9 +41,9 @@ def main() -> None:
     args = parse_args()
 
     tau = 0.038
-    r_max = 20.0
-    k = 3
-    n = 8
+    r_max = 200.0
+    k = 5
+    n = 5
     l_max = 1
 
     config = ExponentialNodeConfig(
