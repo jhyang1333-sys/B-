@@ -52,7 +52,8 @@ def main() -> None:
     bspline = BSplineBasis(knots=knots, order=k)
 
     angular = AngularCoupling()
-    m_nucleus = 1836.15267389
+    # Use the 4He nucleus-to-electron mass ratio (CODATA 2022) for the reduced mass.
+    m_nucleus = 7294.2995365
     mu = m_nucleus / (1.0 + m_nucleus)
     operators = HamiltonianOperators(mu=mu, M=m_nucleus)
     builder = MatrixElementBuilder(
