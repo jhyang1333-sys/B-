@@ -201,6 +201,9 @@ python scripts\run_polarizability_pipeline.py --cache-dir cache_large --cache-ke
 python scripts\plot_dynamic_polarizability.py --no-cache
 ```
 
+### 5.5 运算进度条
+- 后缀`--progress`即可添加运算进度条。
+
 ## 6. 常见问题与排查
 
 - **ImportError: SciPy missing**

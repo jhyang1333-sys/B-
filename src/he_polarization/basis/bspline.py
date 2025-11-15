@@ -26,7 +26,7 @@ except ImportError:  # pragma: no cover - numba not installed.
 _EPS = 1e-12
 
 
-@njit(cache=True)
+@njit()
 def _bspline_recursive_njit(
     knots: np.ndarray,
     r: float,
@@ -64,7 +64,7 @@ def _bspline_recursive_njit(
     return term_left + term_right
 
 
-@njit(cache=True)
+@njit()
 def _bspline_derivative_njit(
     knots: np.ndarray,
     r: float,

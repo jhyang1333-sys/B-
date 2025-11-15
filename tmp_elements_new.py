@@ -35,7 +35,7 @@ except ImportError:  # pragma: no cover - fallback when Numba absent.
         return decorator
 
 
-@njit(cache=True)
+@njit()
 def _safe_power_numba(base: float, exponent: int) -> float:
     if exponent == 0:
         return 1.0
@@ -44,7 +44,7 @@ def _safe_power_numba(base: float, exponent: int) -> float:
     return base ** exponent
 
 
-@njit(cache=True)
+@njit()
 def _radial_factor_components_numba(
     r1: float,
     r2: float,
@@ -178,7 +178,7 @@ def _radial_factor_components_numba(
 _EPS_RADIAL = 1e-14
 
 
-@njit(cache=True)
+@njit()
 def _compute_element_numba(
     i1_row: int,
     i2_row: int,
