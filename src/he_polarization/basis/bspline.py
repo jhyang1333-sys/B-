@@ -6,6 +6,96 @@ from typing import Iterable, List, Tuple
 
 import numpy as np
 
+try:  # Optional acceleration via numba JIT.
+    from numba import njit  # type: ignore
+
+    _HAS_NUMBA = True
+except ImportError:  # pragma: no cover - numba not installed.
+    _HAS_NUMBA = False
+
+    def njit(*args, **kwargs):  # type: ignore
+        if args and callable(args[0]) and not kwargs:
+            return args[0]
+
+        def decorator(func):
+            return func
+
+        return decorator
+
+
+_EPS = 1e-12
+
+
+@njit(cache=True)
+def _bspline_recursive_njit(
+    knots: np.ndarray,
+    r: float,
+    i: int,
+    order: int,
+) -> float:
+    if order == 1:
+        left = knots[i]
+        right = knots[i + 1]
+        if (left <= r < right) or (
+            abs(r - knots[-1]) < _EPS and abs(r - right) < _EPS
+        ):
+            return 1.0
+        return 0.0
+
+    left_denom = knots[i + order - 1] - knots[i]
+    right_denom = knots[i + order] - knots[i + 1]
+
+    term_left = 0.0
+    if abs(left_denom) > _EPS:
+        term_left = (
+            (r - knots[i])
+            / left_denom
+            * _bspline_recursive_njit(knots, r, i, order - 1)
+        )
+
+    term_right = 0.0
+    if abs(right_denom) > _EPS:
+        term_right = (
+            (knots[i + order] - r)
+            / right_denom
+            * _bspline_recursive_njit(knots, r, i + 1, order - 1)
+        )
+
+    return term_left + term_right
+
+
+@njit(cache=True)
+def _bspline_derivative_njit(
+    knots: np.ndarray,
+    r: float,
+    i: int,
+    order: int,
+    deriv_order: int,
+) -> float:
+    if deriv_order <= 0:
+        return _bspline_recursive_njit(knots, r, i, order)
+    if order <= 1:
+        return 0.0
+
+    left_denom = knots[i + order - 1] - knots[i]
+    right_denom = knots[i + order] - knots[i + 1]
+
+    term_left = 0.0
+    if abs(left_denom) > _EPS:
+        factor_left = (order - 1) / left_denom
+        term_left = factor_left * _bspline_derivative_njit(
+            knots, r, i, order - 1, deriv_order - 1
+        )
+
+    term_right = 0.0
+    if abs(right_denom) > _EPS:
+        factor_right = -(order - 1) / right_denom
+        term_right = factor_right * _bspline_derivative_njit(
+            knots, r, i + 1, order - 1, deriv_order - 1
+        )
+
+    return term_left + term_right
+
 
 @dataclass
 class BSplineBasis:
@@ -21,7 +111,7 @@ class BSplineBasis:
 
     knots: np.ndarray
     order: int
-    _eps: float = 1e-12
+    _eps: float = _EPS
 
     def __post_init__(self) -> None:
         self.knots = np.asarray(self.knots, dtype=float)
@@ -43,7 +133,9 @@ class BSplineBasis:
         i = int(i)
         if i < 0 or i >= self.n_basis:
             raise IndexError("样条索引越界。")
-        return self._bspline_recursive(r, i, self.order)
+        if _HAS_NUMBA:
+            return float(_bspline_recursive_njit(self.knots, r, i, self.order))
+        return self._bspline_recursive_python(r, i, self.order)
 
     def derivative(self, r: float, i: int, order: int = 1) -> float:
         """计算第 ``i`` 个样条的高阶导数，使用论文式 (2.28) 的递推。"""
@@ -55,13 +147,22 @@ class BSplineBasis:
             raise ValueError("导数阶数必须为非负整数。")
         if order == 0:
             return self.evaluate(r, i)
+        if _HAS_NUMBA:
+            return float(
+                _bspline_derivative_njit(
+                    self.knots,
+                    r,
+                    i,
+                    self.order,
+                    order,
+                )
+            )
 
         coeffs: List[Tuple[float, int, int]] = [(1.0, i, self.order)]
         for _ in range(order):
             new_coeffs: List[Tuple[float, int, int]] = []
             for coeff, idx, current_order in coeffs:
                 if current_order <= 1:
-                    # 低于 1 阶的样条在继续求导时贡献为零
                     continue
                 left_denom = self.knots[idx +
                                         current_order - 1] - self.knots[idx]
@@ -83,7 +184,8 @@ class BSplineBasis:
         for coeff, idx, current_order in coeffs:
             if idx < 0 or idx >= self.n_basis:
                 continue
-            result += coeff * self._bspline_recursive(r, idx, current_order)
+            result += coeff * \
+                self._bspline_recursive_python(r, idx, current_order)
         return result
 
     def support(self, i: int) -> tuple[float, float]:
@@ -103,7 +205,7 @@ class BSplineBasis:
                 matrix[idx, i] = self.evaluate(r, i)
         return matrix
 
-    def _bspline_recursive(self, r: float, i: int, order: int) -> float:
+    def _bspline_recursive_python(self, r: float, i: int, order: int) -> float:
         # k=1 时为分段常数函数
         if order == 1:
             left = self.knots[i]
@@ -120,11 +222,11 @@ class BSplineBasis:
         term_left = 0.0
         if abs(left_denom) > self._eps:
             term_left = (r - self.knots[i]) / left_denom * \
-                self._bspline_recursive(r, i, order - 1)
+                self._bspline_recursive_python(r, i, order - 1)
 
         term_right = 0.0
         if abs(right_denom) > self._eps:
             term_right = (self.knots[i + order] - r) / right_denom * \
-                self._bspline_recursive(r, i + 1, order - 1)
+                self._bspline_recursive_python(r, i + 1, order - 1)
 
         return term_left + term_right

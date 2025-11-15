@@ -1,0 +1,17 @@
+{
+  "basis_size": 360,
+  "correlation_powers": [
+    0,
+    1
+  ],
+  "exchange_parity": 1,
+  "k": 5,
+  "l_max": 1,
+  "mu": 0.9998629254364407,
+  "n": 5,
+  "num_eigenvalues": 5,
+  "r_max": 200.0,
+  "symmetrize": true,
+  "tau": 0.038,
+  "unique_pairs": true
+}

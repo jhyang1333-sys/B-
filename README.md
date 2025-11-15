@@ -6,40 +6,42 @@
 
 ## 0. 我该怎么开始？（最简步骤）
 
-1. **安装 Python**：确保本机已安装 Python 3.11 以上版本（在 Windows 可通过 [Microsoft Store](https://apps.microsoft.com/) 或官网下载安装）。
+1. **准备 Python & Conda**：推荐使用带有 Conda 的 Python 3.12，以便安装 Numba；Windows 用户可安装 [Miniconda](https://docs.conda.io/en/latest/miniconda.html)。
 2. **下载代码**：将本仓库下载或克隆到本地，例如放在 `C:\helium-project`。
 3. **打开终端**：在仓库根目录启动 PowerShell（或 VS Code 内置终端）。
 4. **输入命令**：依次执行以下命令，即可完成环境搭建与首次运行：
 
     ```powershell
-    python -m venv .venv
-    .\.venv\Scripts\Activate.ps1
+    conda create -n helium-numba python=3.12 numba scipy sympy -y
+    conda activate helium-numba
     pip install -U pip
     pip install -e .
-    python scripts\run_energy_pipeline.py
+    python scripts\run_energy_pipeline.py --progress
     ```
 
 5. **查看输出**：终端会显示若干能级数值以及 Hellmann 判据；如果稍后执行 `python scripts\plot_dynamic_polarizability.py`，还会在 `outputs/` 目录下生成一张极化率曲线图片。
 
-若以上步骤全部执行成功，则说明环境和缓存机制都已准备就绪，后续可以根据需要调整脚本参数或继续进行大规模实验。
+若以上步骤全部执行成功，则说明环境、Numba JIT 加速与缓存机制都已准备就绪；后续可以根据需要调整脚本参数或继续进行大规模实验。
 
 ## 1. 环境准备
 
-- Python ≥ 3.11（已在 3.14 下测试）
+- Python ≥ 3.11（推荐 3.12，以便使用 Numba 0.62）
 - NumPy ≥ 1.26
 - SciPy ≥ 1.11（稀疏矩阵与迭代广义本征求解必需）
 - Matplotlib ≥ 3.8（绘制动态极化率曲线）
+- Numba ≥ 0.58（用于 JIT 加速矩阵装配，可显著降低运行时间）
+- SymPy ≥ 1.12（计算 Wigner 3j/6j 符号和角动量张量）
 
 ### 1.1 创建虚拟环境
 
-在仓库根目录执行以下命令（Windows PowerShell）：
+**推荐方式（Conda）**：
 
 ```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
+conda create -n helium-numba python=3.12 numba scipy sympy -y
+conda activate helium-numba
 ```
 
-Linux/macOS 可将激活命令改为 `source .venv/bin/activate`。
+如已在 Conda 中安装其他包，可省略 `scipy sympy`，但务必保证环境内包含 `numba`。若偏好 venv，也可运行 `python -m venv .venv` 并使用 `pip install numba scipy sympy` 手动安装依赖。
 
 ### 1.2 安装依赖
 
@@ -48,7 +50,7 @@ pip install -U pip
 pip install -e .
 ```
 
-`pip install -e .` 将基于 `pyproject.toml` 安装运行时依赖；如需后续维护工具，可在文件中补充 `extras` 后使用 `pip install -e .[dev]`。命令执行结束后，建议运行 `pip list` 检查是否已出现 `numpy、scipy、matplotlib` 等关键依赖。
+`pip install -e .` 将基于 `pyproject.toml` 安装运行时依赖；如需后续维护工具，可在文件中补充 `extras` 后使用 `pip install -e .[dev]`。命令执行结束后，建议运行 `pip list` 检查是否已出现 `numpy、scipy、matplotlib、numba、sympy` 等关键依赖。
 
 > **提示**：若之前已激活过其他 Conda/venv 环境，请先退出或关闭旧终端，避免解释器混用。
 
@@ -117,7 +119,7 @@ pip install -e .
 
 - `run_energy_pipeline.py`
     - 生成指数型 B 样条节点与角动量通道。
-    - 通过 `MatrixElementBuilder.assemble_matrices` 生成稀疏 `H`、`O` 及各分量矩阵。
+    - 通过 `MatrixElementBuilder.assemble_matrices` 生成稀疏 `H`、`O` 及各分量矩阵（支持 `--progress` 开启装配进度条）。
     - 调用 `EnergyCalculator.diagonalize`（默认稀疏迭代求解）输出目标本征值与向量，并提供 Hellmann 判据。
 - `run_polarizability_pipeline.py`
     - 复用能量结果，进一步构建稀疏偶极矩阵与速度规范动量矩阵。

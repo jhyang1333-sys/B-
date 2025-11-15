@@ -85,7 +85,7 @@ pip install -e .
 
 ## 3. 快速验证（小规模参数）
 
-按照下列步骤可确认安装正确并熟悉计算流程。示例脚本均内置较小参数：`n=8`, `k=3`, `l_max=1`, `num_eigenvalues=5`。如无物理背景，也可以将它们理解为“取一个较小的基组规模，快速获得示例结果”。
+按照下列步骤可确认安装正确并熟悉计算流程。示例脚本均内置较小参数：`n=8`, `k=3`, `l_max=1`, `num_eigenvalues=5`。。
 
 1. **能量谱与 Hellmann 判据**
 
@@ -131,7 +131,7 @@ pip install -e .
     - 通过 `MatrixElementBuilder.assemble_matrices` 生成稀疏 `H`、`O` 及各分量矩阵。
     - 调用 `EnergyCalculator.diagonalize`（默认稀疏迭代求解）输出目标本征值与向量，并提供 Hellmann 判据。
 - `run_polarizability_pipeline.py`
-    - 复用能量管线结果，进一步构建稀疏偶极矩阵与速度规范动量矩阵。
+    - 复用能量结果，进一步构建稀疏偶极矩阵与速度规范动量矩阵。
     - 计算指定态的静态极化率，并在终端打印长度/速度规范匹配情况。
 - `plot_dynamic_polarizability.py`
     - 在频率数组上评估长度/速度/加速度三种规范的动力学极化率。

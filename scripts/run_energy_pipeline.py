@@ -34,6 +34,8 @@ def parse_args() -> argparse.Namespace:
                         help="Cache subdirectory name to use.")
     parser.add_argument("--num-eigenvalues", type=int, default=5,
                         help="Number of lowest eigenpairs to compute (and cache).")
+    parser.add_argument("--progress", action="store_true",
+                        help="Display a progress bar during matrix assembly.")
     return parser.parse_args()
 
 
@@ -106,6 +108,7 @@ def main() -> None:
             weights=weights,
             points=points,
             num_eigenvalues=args.num_eigenvalues,
+            progress="矩阵装配进度" if args.progress else None,
         )
 
         cache_components = dict(components)

@@ -2,11 +2,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Tuple, Union
+from typing import Any, Iterable, Tuple, Union, cast
 
 import numpy as np
-
-from typing import Iterable
 
 from he_polarization.basis.channels import AtomicChannel
 from he_polarization.basis.functions import HylleraasBSplineFunction
@@ -39,10 +37,11 @@ class EnergyCalculator:
         points,
         num_eigenvalues: int | None = None,
         solver_config: IterativeSolverConfig | None = None,
+        progress: bool | str | None = None,
     ) -> Tuple[np.ndarray, np.ndarray, dict]:
         """对广义本征问题进行求解，返回能量与系数矩阵。"""
         H, O, components = self.builder.assemble_matrices(
-            basis_states, weights=weights, points=points)
+            basis_states, weights=weights, points=points, progress=progress)
         if _should_use_iterative_solver(H, O, num_eigenvalues):
             config = solver_config or IterativeSolverConfig()
             if num_eigenvalues is not None:
@@ -50,7 +49,10 @@ class EnergyCalculator:
             eigvals, eigvecs = solve_sparse_generalized_eigen(
                 H, O, config=config)
         else:
-            eigvals, eigvecs = solve_generalized_eigen(H, O)
+            eigvals, eigvecs = solve_generalized_eigen(
+                cast(Any, H),
+                cast(Any, O),
+            )
         return eigvals, eigvecs, components
 
     def extrapolate(self, energies: np.ndarray, n_values: np.ndarray) -> Tuple[float, float]:

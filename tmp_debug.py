@@ -1,6 +1,9 @@
-from he_polarization.numerics import generate_tensor_product_quadrature
-from he_polarization.hamiltonian import HamiltonianOperators, MatrixElementBuilder
-from he_polarization.basis import (
+import pathlib
+import sys
+
+sys.path.append(str(pathlib.Path(__file__).resolve().parent / "src"))
+
+from he_polarization.basis import (  # noqa: E402
     AngularCoupling,
     AtomicChannel,
     BSplineBasis,
@@ -8,10 +11,8 @@ from he_polarization.basis import (
     generate_exponential_nodes,
     generate_hylleraas_bspline_functions,
 )
-import pathlib
-import sys
-
-sys.path.append(str(pathlib.Path(__file__).resolve().parent / "src"))
+from he_polarization.hamiltonian import HamiltonianOperators, MatrixElementBuilder  # noqa: E402
+from he_polarization.numerics import generate_tensor_product_quadrature  # noqa: E402
 
 
 config = ExponentialNodeConfig(r_min=0.0, r_max=5.0, k=3, n=3, gamma=0.1)

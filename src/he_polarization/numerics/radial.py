@@ -12,7 +12,7 @@ from he_polarization.basis.bspline import BSplineBasis
 _EPS = 1e-14
 
 
-@dataclass
+@dataclass(slots=True)
 class RadialPointData:
     """存储给定积分节点处的径向基函数数值与导数。"""
 
@@ -24,6 +24,20 @@ class RadialPointData:
     value_r2: Tuple[float, float]
     d1_r2: Tuple[float, float]
     d2_r2: Tuple[float, float]
+
+
+@dataclass(slots=True)
+class _SegmentCache:
+    """缓存单个区段上所需的样条数值，避免在内层循环中重复递归。"""
+
+    nodes: np.ndarray
+    weights: np.ndarray
+    value_row: np.ndarray
+    value_col: np.ndarray
+    d1_row: np.ndarray
+    d1_col: np.ndarray
+    d2_row: np.ndarray
+    d2_col: np.ndarray
 
 
 class RadialQuadrature2D:
@@ -120,39 +134,52 @@ class RadialQuadrature2D:
 
         accumulator: Tuple[float, ...] | None = None
 
-        for seg_r1 in segments_r1:
-            nodes_r1, weights_r1 = self._map_nodes(seg_r1)
-            for seg_r2 in segments_r2:
-                nodes_r2, weights_r2 = self._map_nodes(seg_r2)
+        segment_cache_r1 = tuple(
+            self._build_segment_cache(segment, i1_row, i1_col)
+            for segment in segments_r1
+        )
+        segment_cache_r2 = tuple(
+            self._build_segment_cache(segment, i2_row, i2_col)
+            for segment in segments_r2
+        )
+
+        for cache_r1 in segment_cache_r1:
+            nodes_r1 = cache_r1.nodes
+            weights_r1 = cache_r1.weights
+            for cache_r2 in segment_cache_r2:
+                nodes_r2 = cache_r2.nodes
+                weights_r2 = cache_r2.weights
                 for idx_r1, r1 in enumerate(nodes_r1):
-                    val_r1_row = self._bspline.evaluate(r1, i1_row)
-                    val_r1_col = self._bspline.evaluate(r1, i1_col)
-                    d1_r1_row = self._bspline.derivative(r1, i1_row, 1)
-                    d1_r1_col = self._bspline.derivative(r1, i1_col, 1)
-                    d2_r1_row = self._bspline.derivative(r1, i1_row, 2)
-                    d2_r1_col = self._bspline.derivative(r1, i1_col, 2)
+                    weight_r1 = weights_r1[idx_r1]
+                    val_r1_row = cache_r1.value_row[idx_r1]
+                    val_r1_col = cache_r1.value_col[idx_r1]
+                    d1_r1_row = cache_r1.d1_row[idx_r1]
+                    d1_r1_col = cache_r1.d1_col[idx_r1]
+                    d2_r1_row = cache_r1.d2_row[idx_r1]
+                    d2_r1_col = cache_r1.d2_col[idx_r1]
+
                     for idx_r2, r2 in enumerate(nodes_r2):
-                        val_r2_row = self._bspline.evaluate(r2, i2_row)
-                        val_r2_col = self._bspline.evaluate(r2, i2_col)
-                        d1_r2_row = self._bspline.derivative(r2, i2_row, 1)
-                        d1_r2_col = self._bspline.derivative(r2, i2_col, 1)
-                        d2_r2_row = self._bspline.derivative(r2, i2_row, 2)
-                        d2_r2_col = self._bspline.derivative(r2, i2_col, 2)
+                        weight = weight_r1 * weights_r2[idx_r2]
+                        val_r2_row = cache_r2.value_row[idx_r2]
+                        val_r2_col = cache_r2.value_col[idx_r2]
+                        d1_r2_row = cache_r2.d1_row[idx_r2]
+                        d1_r2_col = cache_r2.d1_col[idx_r2]
+                        d2_r2_row = cache_r2.d2_row[idx_r2]
+                        d2_r2_col = cache_r2.d2_col[idx_r2]
 
                         point = RadialPointData(
-                            r1=r1,
-                            r2=r2,
-                            value_r1=(val_r1_row, val_r1_col),
-                            d1_r1=(d1_r1_row, d1_r1_col),
-                            d2_r1=(d2_r1_row, d2_r1_col),
-                            value_r2=(val_r2_row, val_r2_col),
-                            d1_r2=(d1_r2_row, d1_r2_col),
-                            d2_r2=(d2_r2_row, d2_r2_col),
+                            r1=float(r1),
+                            r2=float(r2),
+                            value_r1=(float(val_r1_row), float(val_r1_col)),
+                            d1_r1=(float(d1_r1_row), float(d1_r1_col)),
+                            d2_r1=(float(d2_r1_row), float(d2_r1_col)),
+                            value_r2=(float(val_r2_row), float(val_r2_col)),
+                            d1_r2=(float(d1_r2_row), float(d1_r2_col)),
+                            d2_r2=(float(d2_r2_row), float(d2_r2_col)),
                         )
                         values = callback(point)
                         if accumulator is None:
                             accumulator = tuple(0.0 for _ in values)
-                        weight = weights_r1[idx_r1] * weights_r2[idx_r2]
                         accumulator = tuple(
                             acc + weight * val for acc, val in zip(accumulator, values)
                         )
@@ -171,3 +198,39 @@ class RadialQuadrature2D:
             ))
             return zeros
         return accumulator
+
+    def _build_segment_cache(
+        self,
+        segment: Tuple[float, float],
+        idx_row: int,
+        idx_col: int,
+    ) -> _SegmentCache:
+        nodes, weights = self._map_nodes(segment)
+        count = nodes.size
+
+        value_row = np.empty(count, dtype=float)
+        value_col = np.empty(count, dtype=float)
+        d1_row = np.empty(count, dtype=float)
+        d1_col = np.empty(count, dtype=float)
+        d2_row = np.empty(count, dtype=float)
+        d2_col = np.empty(count, dtype=float)
+
+        for idx, radius in enumerate(nodes):
+            radius_float = float(radius)
+            value_row[idx] = self._bspline.evaluate(radius_float, idx_row)
+            value_col[idx] = self._bspline.evaluate(radius_float, idx_col)
+            d1_row[idx] = self._bspline.derivative(radius_float, idx_row, 1)
+            d1_col[idx] = self._bspline.derivative(radius_float, idx_col, 1)
+            d2_row[idx] = self._bspline.derivative(radius_float, idx_row, 2)
+            d2_col[idx] = self._bspline.derivative(radius_float, idx_col, 2)
+
+        return _SegmentCache(
+            nodes=nodes,
+            weights=weights,
+            value_row=value_row,
+            value_col=value_col,
+            d1_row=d1_row,
+            d1_col=d1_col,
+            d2_row=d2_row,
+            d2_col=d2_col,
+        )
