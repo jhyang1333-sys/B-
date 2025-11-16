@@ -36,6 +36,10 @@ def parse_args() -> argparse.Namespace:
                         help="Number of lowest eigenpairs to compute (and cache).")
     parser.add_argument("--progress", action="store_true",
                         help="Display a progress bar during matrix assembly.")
+    parser.add_argument("--assembly-workers", type=int, default=None,
+                        help="Number of worker processes for matrix assembly (default: auto).")
+    parser.add_argument("--assembly-chunk-rows", type=int, default=None,
+                        help="Number of consecutive matrix rows per worker chunk.")
     return parser.parse_args()
 
 
@@ -44,8 +48,8 @@ def main() -> None:
 
     tau = 0.038
     r_max = 20.0
-    k = 5
-    n = 10
+    k = 7
+    n = 20
     l_max = 2
 
     config = ExponentialNodeConfig(
@@ -59,7 +63,12 @@ def main() -> None:
     mu = m_nucleus / (1.0 + m_nucleus)
     operators = HamiltonianOperators(mu=mu, M=m_nucleus)
     builder = MatrixElementBuilder(
-        bspline=bspline, angular=angular, operators=operators)
+        bspline=bspline,
+        angular=angular,
+        operators=operators,
+        max_workers=args.assembly_workers,
+        rows_per_chunk=args.assembly_chunk_rows,
+    )
 
     channels = [
         AtomicChannel(l1=l1, l2=l2, L=L)

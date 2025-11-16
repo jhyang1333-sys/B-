@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Tuple, Union
+import math
+import multiprocessing as mp
+import os
+from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 import sys
 import time
@@ -712,6 +715,47 @@ class _PackedTerms:
     corr_k: np.ndarray
 
 
+@dataclass(frozen=True)
+class _AssemblyScalars:
+    mu: float
+    M: float
+    pref_second: float
+    pref_first: float
+    pref_centrifugal: float
+    pref_cross: float
+    pref_mu_first_extra: float
+    pref_mass_first_extra: float
+    pref_mu_mix: float
+    pref_mass_mix: float
+    pref_mu_j: float
+    pref_mass_j: float
+    scalar_pref_nonzero: bool
+    neg_inv_M: float
+
+
+@dataclass
+class _ChunkResult:
+    overlap_entries: Dict[Tuple[int, int], float]
+    potential_entries: Dict[Tuple[int, int], float]
+    kinetic_entries: Dict[Tuple[int, int], float]
+    mass_entries: Dict[Tuple[int, int], float]
+    time_precompute: float
+    time_kernel: float
+    time_overhead: float
+    pairs_processed: int
+
+
+@dataclass
+class _WorkerPayload:
+    builder: "MatrixElementBuilder"
+    expanded_states: List[Tuple[_BasisTerm, ...]]
+    scalars: _AssemblyScalars
+    size: int
+
+
+_WORKER_PAYLOAD: Optional[_WorkerPayload] = None
+
+
 class _SimpleProgress:
     """Minimal progress reporter to avoid external dependencies."""
 
@@ -773,6 +817,8 @@ class MatrixElementBuilder:
     correlation: CorrelationExpansion = field(
         default_factory=CorrelationExpansion)
     quadrature_order: int = 8
+    max_workers: Optional[int] = None
+    rows_per_chunk: Optional[int] = None
     _angular_cache: Dict[Tuple[int, int, int, int, int, int, int], _AngularComponents] = field(
         init=False, default_factory=dict
     )
@@ -812,15 +858,6 @@ class MatrixElementBuilder:
         ]
         size = len(states)
 
-        overlap_entries: Dict[Tuple[int, int], float] = {}
-        potential_entries: Dict[Tuple[int, int], float] = {}
-        kinetic_entries: Dict[Tuple[int, int], float] = {}
-        mass_entries: Dict[Tuple[int, int], float] = {}
-
-        time_start = time.perf_counter()
-        time_precompute = 0.0
-        time_kernel = 0.0
-        time_overhead = 0.0
         expanded_states = [self._expand_state(state) for state in states]
 
         if isinstance(progress, str):
@@ -851,137 +888,51 @@ class MatrixElementBuilder:
         scalar_pref_nonzero = pref_mu_mix != 0.0 or pref_mass_mix != 0.0
         neg_inv_M = -1.0 / M if M != 0.0 else 0.0
 
+        scalars = _AssemblyScalars(
+            mu=float(mu),
+            M=float(M),
+            pref_second=float(pref_second),
+            pref_first=float(pref_first),
+            pref_centrifugal=float(pref_centrifugal),
+            pref_cross=float(pref_cross),
+            pref_mu_first_extra=float(pref_mu_first_extra),
+            pref_mass_first_extra=float(pref_mass_first_extra),
+            pref_mu_mix=float(pref_mu_mix),
+            pref_mass_mix=float(pref_mass_mix),
+            pref_mu_j=float(pref_mu_j),
+            pref_mass_j=float(pref_mass_j),
+            scalar_pref_nonzero=bool(scalar_pref_nonzero),
+            neg_inv_M=float(neg_inv_M),
+        )
+
+        worker_count = self._resolve_worker_count()
+        used_parallel = worker_count > 1 and size > 1
+        time_start = time.perf_counter()
+        chunk_result: Optional[_ChunkResult] = None
         try:
-            for row, row_terms in enumerate(expanded_states):
-                for col in range(row, size):
-                    col_terms = expanded_states[col]
-
-                    total_overlap = 0.0
-                    total_potential = 0.0
-                    total_kinetic_mu = 0.0
-                    total_mass = 0.0
-                    total_vee = 0.0
-
-                    for term_row in row_terms:
-                        for term_col in col_terms:
-                            c_row = term_row.correlation_power
-                            c_col = term_col.correlation_power
-                            c_total = c_row + c_col
-
-                            t_pre_start = time.perf_counter()
-                            terms_c = self._precompute_terms(
-                                term_row, term_col, c_total)
-                            terms_c_minus2 = self._precompute_terms(
-                                term_row, term_col, c_total - 2)
-                            terms_c_minus1 = self._precompute_terms(
-                                term_row, term_col, c_total - 1)
-                            terms_c_plus2 = self._precompute_terms(
-                                term_row, term_col, c_total + 2)
-                            time_precompute += time.perf_counter() - t_pre_start
-
-                            if (
-                                not terms_c
-                                and not terms_c_minus2
-                                and not terms_c_minus1
-                                and not terms_c_plus2
-                            ):
-                                continue
-
-                            l1 = term_col.channel.l1
-                            l2 = term_col.channel.l2
-
-                            packed_c = self._pack_terms(terms_c)
-                            packed_c_minus2 = self._pack_terms(terms_c_minus2)
-                            packed_c_minus1 = self._pack_terms(terms_c_minus1)
-                            packed_c_plus2 = self._pack_terms(terms_c_plus2)
-
-                            t_kernel_start = time.perf_counter()
-                            overlap_val, potential_val, kinetic_val, mass_val, vee_val = _compute_element_numba(
-                                int(term_row.radial_indices[0]),
-                                int(term_row.radial_indices[1]),
-                                int(term_col.radial_indices[0]),
-                                int(term_col.radial_indices[1]),
-                                self._knots,
-                                int(self.bspline.order),
-                                self._gauss_nodes,
-                                self._gauss_weights,
-                                float(mu),
-                                float(M),
-                                float(pref_second),
-                                float(pref_first),
-                                float(pref_centrifugal),
-                                float(pref_cross),
-                                float(pref_mu_first_extra),
-                                float(pref_mass_first_extra),
-                                float(pref_mu_mix),
-                                float(pref_mass_mix),
-                                float(pref_mu_j),
-                                float(pref_mass_j),
-                                bool(scalar_pref_nonzero),
-                                int(l1),
-                                int(l2),
-                                int(c_col),
-                                float(neg_inv_M),
-                                packed_c.coeff,
-                                packed_c.g1,
-                                packed_c.rhat_grad_12,
-                                packed_c.rhat_grad_21,
-                                packed_c.grad_grad,
-                                packed_c.c_power,
-                                packed_c.corr_q,
-                                packed_c.corr_k,
-                                packed_c_minus2.coeff,
-                                packed_c_minus2.g1,
-                                packed_c_minus2.rhat_grad_12,
-                                packed_c_minus2.rhat_grad_21,
-                                packed_c_minus2.grad_grad,
-                                packed_c_minus2.c_power,
-                                packed_c_minus2.corr_q,
-                                packed_c_minus2.corr_k,
-                                packed_c_minus1.coeff,
-                                packed_c_minus1.g1,
-                                packed_c_minus1.rhat_grad_12,
-                                packed_c_minus1.rhat_grad_21,
-                                packed_c_minus1.grad_grad,
-                                packed_c_minus1.c_power,
-                                packed_c_minus1.corr_q,
-                                packed_c_minus1.corr_k,
-                                packed_c_plus2.coeff,
-                                packed_c_plus2.g1,
-                                packed_c_plus2.rhat_grad_12,
-                                packed_c_plus2.rhat_grad_21,
-                                packed_c_plus2.grad_grad,
-                                packed_c_plus2.c_power,
-                                packed_c_plus2.corr_q,
-                                packed_c_plus2.corr_k,
-                            )
-                            time_kernel += time.perf_counter() - t_kernel_start
-
-                            total_overlap += overlap_val
-                            total_potential += potential_val
-                            total_kinetic_mu += kinetic_val
-                            total_mass += mass_val
-                            total_vee += vee_val
-
-                    potential_total = total_potential + total_vee
-                    t_overhead_start = time.perf_counter()
-                    overlap_entries[(row, col)] = total_overlap
-                    potential_entries[(row, col)] = potential_total
-                    kinetic_entries[(row, col)] = total_kinetic_mu
-                    mass_entries[(row, col)] = total_mass
-
-                    if row != col:
-                        overlap_entries[(col, row)] = total_overlap
-                        potential_entries[(col, row)] = potential_total
-                        kinetic_entries[(col, row)] = total_kinetic_mu
-                        mass_entries[(col, row)] = total_mass
-                    time_overhead += time.perf_counter() - t_overhead_start
-
-                    if reporter is not None:
-                        reporter.update()
+            if worker_count <= 1 or size <= 1:
+                chunk_result = self._assemble_rows(
+                    expanded_states,
+                    size,
+                    scalars,
+                    0,
+                    size,
+                    reporter,
+                )
+            else:
+                chunk_result = self._assemble_parallel(
+                    expanded_states,
+                    size,
+                    scalars,
+                    reporter,
+                    worker_count,
+                )
         finally:
             total_elapsed = time.perf_counter() - time_start
-            if total_elapsed > 0.0:
+            if chunk_result is not None and total_elapsed > 0.0:
+                time_precompute = chunk_result.time_precompute
+                time_kernel = chunk_result.time_kernel
+                time_overhead = chunk_result.time_overhead
                 print("\n--- Assembly timing (seconds) ---")
                 print(
                     f"  Python precompute : {time_precompute:10.2f}"
@@ -996,6 +947,16 @@ class MatrixElementBuilder:
                     f" ({time_overhead / total_elapsed:6.2%})"
                 )
                 print(f"  Total elapsed     : {total_elapsed:10.2f} (100.00%)")
+                if used_parallel:
+                    print("  (timings reflect summed worker CPU seconds)")
+
+        if chunk_result is None:
+            raise RuntimeError("Matrix assembly failed before completion.")
+
+        overlap_entries = chunk_result.overlap_entries
+        potential_entries = chunk_result.potential_entries
+        kinetic_entries = chunk_result.kinetic_entries
+        mass_entries = chunk_result.mass_entries
 
         def _to_sparse(entries: Dict[Tuple[int, int], float]) -> coo_matrix:
             if not entries:
@@ -1020,6 +981,288 @@ class MatrixElementBuilder:
             "mass": mass,
         }
         return h_total, overlap, components
+
+    def _assemble_parallel(
+        self,
+        expanded_states: List[Tuple[_BasisTerm, ...]],
+        size: int,
+        scalars: _AssemblyScalars,
+        reporter: Optional[_SimpleProgress],
+        worker_count: int,
+    ) -> _ChunkResult:
+        chunks = self._make_row_chunks(size, worker_count)
+        if not chunks:
+            return _ChunkResult(
+                overlap_entries={},
+                potential_entries={},
+                kinetic_entries={},
+                mass_entries={},
+                time_precompute=0.0,
+                time_kernel=0.0,
+                time_overhead=0.0,
+                pairs_processed=0,
+            )
+
+        ctx = mp.get_context("spawn")
+        payload = _WorkerPayload(
+            builder=self,
+            expanded_states=expanded_states,
+            scalars=scalars,
+            size=size,
+        )
+
+        overlap_entries: Dict[Tuple[int, int], float] = {}
+        potential_entries: Dict[Tuple[int, int], float] = {}
+        kinetic_entries: Dict[Tuple[int, int], float] = {}
+        mass_entries: Dict[Tuple[int, int], float] = {}
+        time_precompute = 0.0
+        time_kernel = 0.0
+        time_overhead = 0.0
+        pairs_processed = 0
+
+        with ctx.Pool(
+            processes=worker_count,
+            initializer=_parallel_worker_init,
+            initargs=(payload,),
+        ) as pool:
+            for chunk in pool.imap_unordered(
+                _parallel_process_chunk, chunks, chunksize=1
+            ):
+                self._merge_entries(overlap_entries, chunk.overlap_entries)
+                self._merge_entries(potential_entries, chunk.potential_entries)
+                self._merge_entries(kinetic_entries, chunk.kinetic_entries)
+                self._merge_entries(mass_entries, chunk.mass_entries)
+                time_precompute += chunk.time_precompute
+                time_kernel += chunk.time_kernel
+                time_overhead += chunk.time_overhead
+                pairs_processed += chunk.pairs_processed
+                if reporter is not None and chunk.pairs_processed:
+                    reporter.update(chunk.pairs_processed)
+
+        return _ChunkResult(
+            overlap_entries=overlap_entries,
+            potential_entries=potential_entries,
+            kinetic_entries=kinetic_entries,
+            mass_entries=mass_entries,
+            time_precompute=time_precompute,
+            time_kernel=time_kernel,
+            time_overhead=time_overhead,
+            pairs_processed=pairs_processed,
+        )
+
+    def _assemble_rows(
+        self,
+        expanded_states: List[Tuple[_BasisTerm, ...]],
+        size: int,
+        scalars: _AssemblyScalars,
+        row_start: int,
+        row_end: int,
+        reporter: Optional[_SimpleProgress],
+    ) -> _ChunkResult:
+        overlap_entries: Dict[Tuple[int, int], float] = {}
+        potential_entries: Dict[Tuple[int, int], float] = {}
+        kinetic_entries: Dict[Tuple[int, int], float] = {}
+        mass_entries: Dict[Tuple[int, int], float] = {}
+        time_precompute = 0.0
+        time_kernel = 0.0
+        time_overhead = 0.0
+        pairs_processed = 0
+
+        if row_start >= row_end:
+            return _ChunkResult(
+                overlap_entries,
+                potential_entries,
+                kinetic_entries,
+                mass_entries,
+                time_precompute,
+                time_kernel,
+                time_overhead,
+                pairs_processed,
+            )
+
+        for row in range(row_start, row_end):
+            row_terms = expanded_states[row]
+            for col in range(row, size):
+                col_terms = expanded_states[col]
+
+                total_overlap = 0.0
+                total_potential = 0.0
+                total_kinetic_mu = 0.0
+                total_mass = 0.0
+                total_vee = 0.0
+
+                for term_row in row_terms:
+                    for term_col in col_terms:
+                        c_row = term_row.correlation_power
+                        c_col = term_col.correlation_power
+                        c_total = c_row + c_col
+
+                        t_pre_start = time.perf_counter()
+                        terms_c = self._precompute_terms(
+                            term_row, term_col, c_total)
+                        terms_c_minus2 = self._precompute_terms(
+                            term_row, term_col, c_total - 2)
+                        terms_c_minus1 = self._precompute_terms(
+                            term_row, term_col, c_total - 1)
+                        terms_c_plus2 = self._precompute_terms(
+                            term_row, term_col, c_total + 2)
+                        time_precompute += time.perf_counter() - t_pre_start
+
+                        if (
+                            not terms_c
+                            and not terms_c_minus2
+                            and not terms_c_minus1
+                            and not terms_c_plus2
+                        ):
+                            continue
+
+                        l1 = term_col.channel.l1
+                        l2 = term_col.channel.l2
+
+                        packed_c = self._pack_terms(terms_c)
+                        packed_c_minus2 = self._pack_terms(terms_c_minus2)
+                        packed_c_minus1 = self._pack_terms(terms_c_minus1)
+                        packed_c_plus2 = self._pack_terms(terms_c_plus2)
+
+                        t_kernel_start = time.perf_counter()
+                        overlap_val, potential_val, kinetic_val, mass_val, vee_val = _compute_element_numba(
+                            int(term_row.radial_indices[0]),
+                            int(term_row.radial_indices[1]),
+                            int(term_col.radial_indices[0]),
+                            int(term_col.radial_indices[1]),
+                            self._knots,
+                            int(self.bspline.order),
+                            self._gauss_nodes,
+                            self._gauss_weights,
+                            float(scalars.mu),
+                            float(scalars.M),
+                            float(scalars.pref_second),
+                            float(scalars.pref_first),
+                            float(scalars.pref_centrifugal),
+                            float(scalars.pref_cross),
+                            float(scalars.pref_mu_first_extra),
+                            float(scalars.pref_mass_first_extra),
+                            float(scalars.pref_mu_mix),
+                            float(scalars.pref_mass_mix),
+                            float(scalars.pref_mu_j),
+                            float(scalars.pref_mass_j),
+                            bool(scalars.scalar_pref_nonzero),
+                            int(l1),
+                            int(l2),
+                            int(c_col),
+                            float(scalars.neg_inv_M),
+                            packed_c.coeff,
+                            packed_c.g1,
+                            packed_c.rhat_grad_12,
+                            packed_c.rhat_grad_21,
+                            packed_c.grad_grad,
+                            packed_c.c_power,
+                            packed_c.corr_q,
+                            packed_c.corr_k,
+                            packed_c_minus2.coeff,
+                            packed_c_minus2.g1,
+                            packed_c_minus2.rhat_grad_12,
+                            packed_c_minus2.rhat_grad_21,
+                            packed_c_minus2.grad_grad,
+                            packed_c_minus2.c_power,
+                            packed_c_minus2.corr_q,
+                            packed_c_minus2.corr_k,
+                            packed_c_minus1.coeff,
+                            packed_c_minus1.g1,
+                            packed_c_minus1.rhat_grad_12,
+                            packed_c_minus1.rhat_grad_21,
+                            packed_c_minus1.grad_grad,
+                            packed_c_minus1.c_power,
+                            packed_c_minus1.corr_q,
+                            packed_c_minus1.corr_k,
+                            packed_c_plus2.coeff,
+                            packed_c_plus2.g1,
+                            packed_c_plus2.rhat_grad_12,
+                            packed_c_plus2.rhat_grad_21,
+                            packed_c_plus2.grad_grad,
+                            packed_c_plus2.c_power,
+                            packed_c_plus2.corr_q,
+                            packed_c_plus2.corr_k,
+                        )
+                        time_kernel += time.perf_counter() - t_kernel_start
+
+                        total_overlap += overlap_val
+                        total_potential += potential_val
+                        total_kinetic_mu += kinetic_val
+                        total_mass += mass_val
+                        total_vee += vee_val
+
+                potential_total = total_potential + total_vee
+                t_overhead_start = time.perf_counter()
+                overlap_entries[(row, col)] = total_overlap
+                potential_entries[(row, col)] = potential_total
+                kinetic_entries[(row, col)] = total_kinetic_mu
+                mass_entries[(row, col)] = total_mass
+
+                if row != col:
+                    overlap_entries[(col, row)] = total_overlap
+                    potential_entries[(col, row)] = potential_total
+                    kinetic_entries[(col, row)] = total_kinetic_mu
+                    mass_entries[(col, row)] = total_mass
+                time_overhead += time.perf_counter() - t_overhead_start
+
+                pairs_processed += 1
+                if reporter is not None:
+                    reporter.update()
+
+        return _ChunkResult(
+            overlap_entries,
+            potential_entries,
+            kinetic_entries,
+            mass_entries,
+            time_precompute,
+            time_kernel,
+            time_overhead,
+            pairs_processed,
+        )
+
+    def _resolve_worker_count(self) -> int:
+        if self.max_workers is not None:
+            return max(1, int(self.max_workers))
+        env_value = os.getenv("HEP_ASSEMBLY_WORKERS")
+        if env_value:
+            try:
+                value = int(env_value)
+                if value >= 1:
+                    return value
+            except ValueError:
+                pass
+        cpu_count = os.cpu_count() or 1
+        return max(1, cpu_count)
+
+    def _make_row_chunks(self, size: int, worker_count: int) -> List[Tuple[int, int]]:
+        if size <= 0:
+            return []
+        if worker_count <= 0:
+            worker_count = 1
+        if self.rows_per_chunk is not None and self.rows_per_chunk > 0:
+            row_span = int(self.rows_per_chunk)
+        else:
+            row_span = max(1, math.ceil(size / (worker_count * 4)))
+
+        chunks: List[Tuple[int, int]] = []
+        start = 0
+        while start < size:
+            end = min(size, start + row_span)
+            chunks.append((start, end))
+            start = end
+        return chunks
+
+    @staticmethod
+    def _merge_entries(
+        target: Dict[Tuple[int, int], float],
+        source: Dict[Tuple[int, int], float],
+    ) -> None:
+        for key, value in source.items():
+            if key in target:
+                target[key] += value
+            else:
+                target[key] = value
 
     def _angular_components(
         self,
@@ -1241,3 +1484,26 @@ class MatrixElementBuilder:
                 correlation_power=swapped.correlation_power,
             ),
         )
+
+
+def _parallel_worker_init(payload: _WorkerPayload) -> None:
+    global _WORKER_PAYLOAD
+    _WORKER_PAYLOAD = payload
+
+
+def _parallel_process_chunk(row_range: Tuple[int, int]) -> _ChunkResult:
+    if _WORKER_PAYLOAD is None:
+        raise RuntimeError("Worker payload is not initialized.")
+    builder = _WORKER_PAYLOAD.builder
+    expanded_states = _WORKER_PAYLOAD.expanded_states
+    scalars = _WORKER_PAYLOAD.scalars
+    size = _WORKER_PAYLOAD.size
+    start, end = row_range
+    return builder._assemble_rows(
+        expanded_states,
+        size,
+        scalars,
+        start,
+        end,
+        reporter=None,
+    )
