@@ -43,10 +43,10 @@ def main() -> None:
     args = parse_args()
 
     tau = 0.038
-    r_max = 200.0
+    r_max = 20.0
     k = 5
-    n = 5
-    l_max = 1
+    n = 10
+    l_max = 2
 
     config = ExponentialNodeConfig(
         r_min=0.0, r_max=r_max, k=k, n=n, gamma=r_max * tau)

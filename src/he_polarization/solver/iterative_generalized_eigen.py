@@ -36,7 +36,7 @@ def solve_sparse_generalized_eigen(
 
     try:
         from scipy.sparse import csc_matrix, csr_matrix, issparse
-        from scipy.sparse.linalg import eigsh
+        from scipy.sparse.linalg import eigsh, splu
     except ModuleNotFoundError as exc:  # pragma: no cover
         raise ModuleNotFoundError(
             "需要安装 SciPy 才能使用稀疏广义本征求解器。"
@@ -70,6 +70,7 @@ def solve_sparse_generalized_eigen(
     # SciPy 的 eigsh 要求 CSR/CSC 格式才能高效执行。
     H_sparse = _to_csr(H_sparse, csr_matrix, issparse)
     O_sparse = _to_csr(O_sparse, csr_matrix, issparse)
+    O_sparse = _regularize_sparse_overlap(O_sparse, csr_matrix, splu)
 
     eigvals, eigvecs = eigsh(
         H_sparse,
@@ -112,3 +113,27 @@ def _postprocess_eigensystem(eigvals, eigvecs, overlap_matrix):
     norms = np.sqrt(diag)
     eigvecs = eigvecs / norms
     return eigvals, eigvecs
+
+
+def _regularize_sparse_overlap(matrix, csr_matrix, splu):
+    n = matrix.shape[0]
+    if n == 0:
+        return matrix
+
+    diag = np.abs(matrix.diagonal())
+    scale = float(np.max(diag)) if diag.size else 1.0
+    jitter = 1e-10 * scale if scale > 0.0 else 1e-10
+    diag_indices = np.arange(n)
+
+    for _ in range(12):
+        data = np.full(n, jitter, dtype=matrix.dtype)
+        addition = csr_matrix(
+            (data, (diag_indices, diag_indices)), shape=matrix.shape)
+        candidate = matrix + addition
+        try:
+            splu(candidate.tocsc())
+            return candidate
+        except RuntimeError:
+            jitter *= 10.0
+
+    raise RuntimeError("无法对交叠矩阵进行正则化，仍非正定。")

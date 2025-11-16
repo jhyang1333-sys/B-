@@ -816,6 +816,11 @@ class MatrixElementBuilder:
         potential_entries: Dict[Tuple[int, int], float] = {}
         kinetic_entries: Dict[Tuple[int, int], float] = {}
         mass_entries: Dict[Tuple[int, int], float] = {}
+
+        time_start = time.perf_counter()
+        time_precompute = 0.0
+        time_kernel = 0.0
+        time_overhead = 0.0
         expanded_states = [self._expand_state(state) for state in states]
 
         if isinstance(progress, str):
@@ -846,127 +851,151 @@ class MatrixElementBuilder:
         scalar_pref_nonzero = pref_mu_mix != 0.0 or pref_mass_mix != 0.0
         neg_inv_M = -1.0 / M if M != 0.0 else 0.0
 
-        for row, row_terms in enumerate(expanded_states):
-            for col in range(row, size):
-                col_terms = expanded_states[col]
+        try:
+            for row, row_terms in enumerate(expanded_states):
+                for col in range(row, size):
+                    col_terms = expanded_states[col]
 
-                total_overlap = 0.0
-                total_potential = 0.0
-                total_kinetic_mu = 0.0
-                total_mass = 0.0
-                total_vee = 0.0
+                    total_overlap = 0.0
+                    total_potential = 0.0
+                    total_kinetic_mu = 0.0
+                    total_mass = 0.0
+                    total_vee = 0.0
 
-                for term_row in row_terms:
-                    for term_col in col_terms:
-                        c_row = term_row.correlation_power
-                        c_col = term_col.correlation_power
-                        c_total = c_row + c_col
+                    for term_row in row_terms:
+                        for term_col in col_terms:
+                            c_row = term_row.correlation_power
+                            c_col = term_col.correlation_power
+                            c_total = c_row + c_col
 
-                        terms_c = self._precompute_terms(
-                            term_row, term_col, c_total)
-                        terms_c_minus2 = self._precompute_terms(
-                            term_row, term_col, c_total - 2)
-                        terms_c_minus1 = self._precompute_terms(
-                            term_row, term_col, c_total - 1)
-                        terms_c_plus2 = self._precompute_terms(
-                            term_row, term_col, c_total + 2)
+                            t_pre_start = time.perf_counter()
+                            terms_c = self._precompute_terms(
+                                term_row, term_col, c_total)
+                            terms_c_minus2 = self._precompute_terms(
+                                term_row, term_col, c_total - 2)
+                            terms_c_minus1 = self._precompute_terms(
+                                term_row, term_col, c_total - 1)
+                            terms_c_plus2 = self._precompute_terms(
+                                term_row, term_col, c_total + 2)
+                            time_precompute += time.perf_counter() - t_pre_start
 
-                        if (
-                            not terms_c
-                            and not terms_c_minus2
-                            and not terms_c_minus1
-                            and not terms_c_plus2
-                        ):
-                            continue
+                            if (
+                                not terms_c
+                                and not terms_c_minus2
+                                and not terms_c_minus1
+                                and not terms_c_plus2
+                            ):
+                                continue
 
-                        l1 = term_col.channel.l1
-                        l2 = term_col.channel.l2
+                            l1 = term_col.channel.l1
+                            l2 = term_col.channel.l2
 
-                        packed_c = self._pack_terms(terms_c)
-                        packed_c_minus2 = self._pack_terms(terms_c_minus2)
-                        packed_c_minus1 = self._pack_terms(terms_c_minus1)
-                        packed_c_plus2 = self._pack_terms(terms_c_plus2)
+                            packed_c = self._pack_terms(terms_c)
+                            packed_c_minus2 = self._pack_terms(terms_c_minus2)
+                            packed_c_minus1 = self._pack_terms(terms_c_minus1)
+                            packed_c_plus2 = self._pack_terms(terms_c_plus2)
 
-                        overlap_val, potential_val, kinetic_val, mass_val, vee_val = _compute_element_numba(
-                            int(term_row.radial_indices[0]),
-                            int(term_row.radial_indices[1]),
-                            int(term_col.radial_indices[0]),
-                            int(term_col.radial_indices[1]),
-                            self._knots,
-                            int(self.bspline.order),
-                            self._gauss_nodes,
-                            self._gauss_weights,
-                            float(mu),
-                            float(M),
-                            float(pref_second),
-                            float(pref_first),
-                            float(pref_centrifugal),
-                            float(pref_cross),
-                            float(pref_mu_first_extra),
-                            float(pref_mass_first_extra),
-                            float(pref_mu_mix),
-                            float(pref_mass_mix),
-                            float(pref_mu_j),
-                            float(pref_mass_j),
-                            bool(scalar_pref_nonzero),
-                            int(l1),
-                            int(l2),
-                            int(c_col),
-                            float(neg_inv_M),
-                            packed_c.coeff,
-                            packed_c.g1,
-                            packed_c.rhat_grad_12,
-                            packed_c.rhat_grad_21,
-                            packed_c.grad_grad,
-                            packed_c.c_power,
-                            packed_c.corr_q,
-                            packed_c.corr_k,
-                            packed_c_minus2.coeff,
-                            packed_c_minus2.g1,
-                            packed_c_minus2.rhat_grad_12,
-                            packed_c_minus2.rhat_grad_21,
-                            packed_c_minus2.grad_grad,
-                            packed_c_minus2.c_power,
-                            packed_c_minus2.corr_q,
-                            packed_c_minus2.corr_k,
-                            packed_c_minus1.coeff,
-                            packed_c_minus1.g1,
-                            packed_c_minus1.rhat_grad_12,
-                            packed_c_minus1.rhat_grad_21,
-                            packed_c_minus1.grad_grad,
-                            packed_c_minus1.c_power,
-                            packed_c_minus1.corr_q,
-                            packed_c_minus1.corr_k,
-                            packed_c_plus2.coeff,
-                            packed_c_plus2.g1,
-                            packed_c_plus2.rhat_grad_12,
-                            packed_c_plus2.rhat_grad_21,
-                            packed_c_plus2.grad_grad,
-                            packed_c_plus2.c_power,
-                            packed_c_plus2.corr_q,
-                            packed_c_plus2.corr_k,
-                        )
+                            t_kernel_start = time.perf_counter()
+                            overlap_val, potential_val, kinetic_val, mass_val, vee_val = _compute_element_numba(
+                                int(term_row.radial_indices[0]),
+                                int(term_row.radial_indices[1]),
+                                int(term_col.radial_indices[0]),
+                                int(term_col.radial_indices[1]),
+                                self._knots,
+                                int(self.bspline.order),
+                                self._gauss_nodes,
+                                self._gauss_weights,
+                                float(mu),
+                                float(M),
+                                float(pref_second),
+                                float(pref_first),
+                                float(pref_centrifugal),
+                                float(pref_cross),
+                                float(pref_mu_first_extra),
+                                float(pref_mass_first_extra),
+                                float(pref_mu_mix),
+                                float(pref_mass_mix),
+                                float(pref_mu_j),
+                                float(pref_mass_j),
+                                bool(scalar_pref_nonzero),
+                                int(l1),
+                                int(l2),
+                                int(c_col),
+                                float(neg_inv_M),
+                                packed_c.coeff,
+                                packed_c.g1,
+                                packed_c.rhat_grad_12,
+                                packed_c.rhat_grad_21,
+                                packed_c.grad_grad,
+                                packed_c.c_power,
+                                packed_c.corr_q,
+                                packed_c.corr_k,
+                                packed_c_minus2.coeff,
+                                packed_c_minus2.g1,
+                                packed_c_minus2.rhat_grad_12,
+                                packed_c_minus2.rhat_grad_21,
+                                packed_c_minus2.grad_grad,
+                                packed_c_minus2.c_power,
+                                packed_c_minus2.corr_q,
+                                packed_c_minus2.corr_k,
+                                packed_c_minus1.coeff,
+                                packed_c_minus1.g1,
+                                packed_c_minus1.rhat_grad_12,
+                                packed_c_minus1.rhat_grad_21,
+                                packed_c_minus1.grad_grad,
+                                packed_c_minus1.c_power,
+                                packed_c_minus1.corr_q,
+                                packed_c_minus1.corr_k,
+                                packed_c_plus2.coeff,
+                                packed_c_plus2.g1,
+                                packed_c_plus2.rhat_grad_12,
+                                packed_c_plus2.rhat_grad_21,
+                                packed_c_plus2.grad_grad,
+                                packed_c_plus2.c_power,
+                                packed_c_plus2.corr_q,
+                                packed_c_plus2.corr_k,
+                            )
+                            time_kernel += time.perf_counter() - t_kernel_start
 
-                        total_overlap += overlap_val
-                        total_potential += potential_val
-                        total_kinetic_mu += kinetic_val
-                        total_mass += mass_val
-                        total_vee += vee_val
+                            total_overlap += overlap_val
+                            total_potential += potential_val
+                            total_kinetic_mu += kinetic_val
+                            total_mass += mass_val
+                            total_vee += vee_val
 
-                potential_total = total_potential + total_vee
-                overlap_entries[(row, col)] = total_overlap
-                potential_entries[(row, col)] = potential_total
-                kinetic_entries[(row, col)] = total_kinetic_mu
-                mass_entries[(row, col)] = total_mass
+                    potential_total = total_potential + total_vee
+                    t_overhead_start = time.perf_counter()
+                    overlap_entries[(row, col)] = total_overlap
+                    potential_entries[(row, col)] = potential_total
+                    kinetic_entries[(row, col)] = total_kinetic_mu
+                    mass_entries[(row, col)] = total_mass
 
-                if row != col:
-                    overlap_entries[(col, row)] = total_overlap
-                    potential_entries[(col, row)] = potential_total
-                    kinetic_entries[(col, row)] = total_kinetic_mu
-                    mass_entries[(col, row)] = total_mass
+                    if row != col:
+                        overlap_entries[(col, row)] = total_overlap
+                        potential_entries[(col, row)] = potential_total
+                        kinetic_entries[(col, row)] = total_kinetic_mu
+                        mass_entries[(col, row)] = total_mass
+                    time_overhead += time.perf_counter() - t_overhead_start
 
-                if reporter is not None:
-                    reporter.update()
+                    if reporter is not None:
+                        reporter.update()
+        finally:
+            total_elapsed = time.perf_counter() - time_start
+            if total_elapsed > 0.0:
+                print("\n--- Assembly timing (seconds) ---")
+                print(
+                    f"  Python precompute : {time_precompute:10.2f}"
+                    f" ({time_precompute / total_elapsed:6.2%})"
+                )
+                print(
+                    f"  Numba kernel      : {time_kernel:10.2f}"
+                    f" ({time_kernel / total_elapsed:6.2%})"
+                )
+                print(
+                    f"  Python overhead   : {time_overhead:10.2f}"
+                    f" ({time_overhead / total_elapsed:6.2%})"
+                )
+                print(f"  Total elapsed     : {total_elapsed:10.2f} (100.00%)")
 
         def _to_sparse(entries: Dict[Tuple[int, int], float]) -> coo_matrix:
             if not entries:
