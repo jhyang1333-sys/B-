@@ -3,6 +3,7 @@
 ##### 傻瓜版使用教程
 
 本代码按照《氦原子体系能级与极化率的高精度计算》中的公式与数值流程，构建了从基函数生成、哈密顿矩阵装配到极化率评估的完整 Python 实现。核心矩阵均以稀疏格式存储，可支撑大规模 B 样条基组的数值实验。可以按照本指南的步骤完成安装、运行并查看输出结果。
+> 附带论文《[氦原子体系能级与极化率的高精度计算](氦原子体系能级与极化率的高精度计算_杨三江.pdf)》与[hamiltonian_operator_mapping](hamiltonian_operator_mapping.md)（论文里没写但是至关重要的推导与结果）
 
 ## 0. 我该怎么开始？（最简步骤）
 
@@ -76,7 +77,7 @@ pip install -e .
 
 ## 3. 快速验证（小规模参数）
 
-按照下列步骤可确认安装正确并熟悉计算流程。示例脚本均内置较小参数：`n=8`, `k=3`, `l_max=1`, `num_eigenvalues=5`。。
+按照下列步骤可确认安装正确并熟悉计算流程。示例脚本均内置较小参数：`n=8`, `k=3`, `l_max=1`, `num_eigenvalues=5`。（这套参数是注定发散的，但是可以用来看有没有跑通）
 
 1. **能量谱与 Hellmann 判据**
 
@@ -174,6 +175,8 @@ energies, vectors, components = calculator.diagonalize(
 
 当 `num_eigenvalues` 为空或大于矩阵阶数时，代码自动调用稠密求解器（需充足内存）。
 
+- `num_eigenvalues`在`iterative_generalized_eigen.py`的`IterativeSolverConfig`类中可以找到。
+
 ### 5.3 自定义频率网格与输出位置（调整绘图参数）
 
 `plot_dynamic_polarizability.py` 中的 `freqs = np.linspace(0.0, 0.8, 40)` 与 `output_dir = Path("outputs")` 可按需调整；若脚本用于批量扫描，可在循环中改写输出文件名或将数据导出为 CSV。
@@ -206,6 +209,29 @@ python scripts\plot_dynamic_polarizability.py --no-cache
 - 进度条并不是连续增加的，而是“跳跃性”的，这是正常现象。
 > 比如从0%直接跳跃到2%
 - 若进度条是连续增加的，说明并行运算没有正确开启。
+
+### 5.6 并行启动方式
+
+#### 5.6.1 Windows/MacOS
+
+Windows/MacOS系统Python只能使用`spawn`方式。这个启动方式会导致并行启动时占用极其恐怖的运行内存，容易导致内存爆炸（估计使用5.1参数时会使用1.8TB内存），不推荐在Windows/MacOS系统上进行大参数的计算。![alt text](16b71159f519ecf8dfdf0989776510a.png)
+
+#### 5.6.2 Linux
+
+Linux系统可以使用更高效的`fork`方式。这个启动方式的启动内存几乎为0，可以极大节省运行内存。推荐在Linux系统上运行代码。
+
+#### 5.6.3 如何调整启动方式？
+
+在文件`elements.py`的1006行（或者附近）的代码
+```dotnetcli
+ctx = mp.get_context("spawn")
+```
+强制使用了`spawn`方式（为了MacOS系统的兼容性），对于Linux系统，可以更改为
+```dotnetcli
+ctx = mp.get_context(None) # 或者直接用 ctx = mp
+```
+将 `spawn` 改为 `None` 会让 `multiprocessing` 自动选择 Linux 上的默认值，即 `fork`方式。
+
 
 ## 6. 常见问题与排查
 
