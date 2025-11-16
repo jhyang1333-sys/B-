@@ -138,12 +138,24 @@ def main() -> None:
                 metadata=metadata,
             )
 
+    # ground_vec = eigenvectors[:, 0]
+    # kinetic_expect = expectation_from_matrix(ground_vec, components["kinetic"])
+    # potential_expect = expectation_from_matrix(
+    #    ground_vec, components["potential"])
+    # eta = calculator.hellmann_eta(
+    #    expect_T=kinetic_expect, expect_V=potential_expect)
+
     ground_vec = eigenvectors[:, 0]
-    kinetic_expect = expectation_from_matrix(ground_vec, components["kinetic"])
+    kinetic_mu_expect = expectation_from_matrix(
+        ground_vec, components["kinetic"])
+    mass_expect = expectation_from_matrix(ground_vec, components["mass"])
+    total_kinetic_expect = kinetic_mu_expect + mass_expect  # <--- 加上质量项
+
     potential_expect = expectation_from_matrix(
         ground_vec, components["potential"])
+
     eta = calculator.hellmann_eta(
-        expect_T=kinetic_expect, expect_V=potential_expect)
+        expect_T=total_kinetic_expect, expect_V=potential_expect)  # <--- 使用总动能
 
     print("最低几个能级 (a.u.):")
     for idx, energy in enumerate(energies[:5]):
