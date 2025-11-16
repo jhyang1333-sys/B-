@@ -7,6 +7,7 @@
 
 ## 0. 我该怎么开始？（最简步骤）
 
+1. **计算环境**：
 1. **准备 Python & Conda**：推荐使用带有 Conda 的 Python 3.12，以便安装 Numba；Windows 用户可安装 [Miniconda](https://docs.conda.io/en/latest/miniconda.html)。
 2. **下载代码**：将本仓库下载或克隆到本地，例如放在 `C:\helium-project`。
 3. **打开终端**：在仓库根目录启动 PowerShell（或 VS Code 内置终端）。
@@ -222,7 +223,7 @@ Linux系统可以使用更高效的`fork`方式。这个启动方式的启动内
 
 #### 5.6.3 如何调整启动方式？
 
-在文件`elements.py`的1006行（或者附近）的代码
+在文件`elements.py`的1029行（或者附近）的代码
 ```dotnetcli
 ctx = mp.get_context("spawn")
 ```

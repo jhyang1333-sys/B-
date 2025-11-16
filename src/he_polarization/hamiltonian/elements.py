@@ -2,16 +2,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from collections import defaultdict
 import math
 import multiprocessing as mp
 import os
+from pathlib import Path
+import shutil
+import sys
+import tempfile
+import time
 from typing import Dict, Iterable, List, Optional, Tuple, Union
 
-import sys
-import time
-
 import numpy as np
-from scipy.sparse import coo_matrix
+from scipy.sparse import coo_matrix, load_npz, save_npz
 
 from he_polarization.basis.bspline import (
     BSplineBasis,
@@ -735,10 +738,8 @@ class _AssemblyScalars:
 
 @dataclass
 class _ChunkResult:
-    overlap_entries: Dict[Tuple[int, int], float]
-    potential_entries: Dict[Tuple[int, int], float]
-    kinetic_entries: Dict[Tuple[int, int], float]
-    mass_entries: Dict[Tuple[int, int], float]
+    chunk_id: int
+    chunk_paths: Dict[str, str]
     time_precompute: float
     time_kernel: float
     time_overhead: float
@@ -907,32 +908,54 @@ class MatrixElementBuilder:
 
         worker_count = self._resolve_worker_count()
         used_parallel = worker_count > 1 and size > 1
+
+        chunk_root = Path("cache") / "assembly_chunks"
+        chunk_root.mkdir(parents=True, exist_ok=True)
+        chunk_dir = Path(
+            tempfile.mkdtemp(prefix="chunk_run_", dir=str(chunk_root))
+        )
+        print(f"Using out-of-core temporary directory: {chunk_dir}")
+
+        chunk_results: List[_ChunkResult] = []
+        final_matrices: Dict[str, coo_matrix] = {}
         time_start = time.perf_counter()
-        chunk_result: Optional[_ChunkResult] = None
+
         try:
             if worker_count <= 1 or size <= 1:
-                chunk_result = self._assemble_rows(
-                    expanded_states,
-                    size,
-                    scalars,
-                    0,
-                    size,
-                    reporter,
+                chunk_results.append(
+                    self._assemble_rows(
+                        expanded_states,
+                        size,
+                        scalars,
+                        0,
+                        size,
+                        reporter,
+                        chunk_id=0,
+                        chunk_dir=chunk_dir,
+                    )
                 )
             else:
-                chunk_result = self._assemble_parallel(
-                    expanded_states,
-                    size,
-                    scalars,
-                    reporter,
-                    worker_count,
+                chunk_results.extend(
+                    self._assemble_parallel(
+                        expanded_states,
+                        size,
+                        scalars,
+                        reporter,
+                        worker_count,
+                        chunk_dir,
+                    )
                 )
-        finally:
+
+            if not chunk_results:
+                raise RuntimeError("Matrix assembly failed before completion.")
+
             total_elapsed = time.perf_counter() - time_start
-            if chunk_result is not None and total_elapsed > 0.0:
-                time_precompute = chunk_result.time_precompute
-                time_kernel = chunk_result.time_kernel
-                time_overhead = chunk_result.time_overhead
+            if total_elapsed > 0.0:
+                time_precompute = sum(
+                    chunk.time_precompute for chunk in chunk_results)
+                time_kernel = sum(chunk.time_kernel for chunk in chunk_results)
+                time_overhead = sum(
+                    chunk.time_overhead for chunk in chunk_results)
                 print("\n--- Assembly timing (seconds) ---")
                 print(
                     f"  Python precompute : {time_precompute:10.2f}"
@@ -950,28 +973,36 @@ class MatrixElementBuilder:
                 if used_parallel:
                     print("  (timings reflect summed worker CPU seconds)")
 
-        if chunk_result is None:
-            raise RuntimeError("Matrix assembly failed before completion.")
+            print("Assembly complete. Merging sparse matrices from disk...")
+            chunk_paths: Dict[str, List[str]] = defaultdict(list)
+            for chunk in sorted(chunk_results, key=lambda c: c.chunk_id):
+                for key, path in chunk.chunk_paths.items():
+                    chunk_paths[key].append(path)
 
-        overlap_entries = chunk_result.overlap_entries
-        potential_entries = chunk_result.potential_entries
-        kinetic_entries = chunk_result.kinetic_entries
-        mass_entries = chunk_result.mass_entries
+            final_matrices = {}
+            for key, paths in chunk_paths.items():
+                matrix_sum: Optional[coo_matrix] = None
+                for path in paths:
+                    chunk_matrix = load_npz(path).tocoo()
+                    if matrix_sum is None:
+                        matrix_sum = chunk_matrix
+                    else:
+                        matrix_sum = matrix_sum + chunk_matrix
+                if matrix_sum is not None:
+                    final_matrices[key] = matrix_sum.tocoo()
 
-        def _to_sparse(entries: Dict[Tuple[int, int], float]) -> coo_matrix:
-            if not entries:
-                return coo_matrix((size, size))
-            rows, cols, data = zip(*((i, j, v)
-                                   for (i, j), v in entries.items()))
-            return coo_matrix((data, (rows, cols)), shape=(size, size))
+            print("Matrix merge complete.")
+        finally:
+            if reporter is not None:
+                reporter.close()
+            if chunk_dir.exists():
+                print(f"Cleaning up temporary directory: {chunk_dir}")
+                shutil.rmtree(chunk_dir, ignore_errors=True)
 
-        overlap = _to_sparse(overlap_entries)
-        potential = _to_sparse(potential_entries)
-        kinetic = _to_sparse(kinetic_entries)
-        mass = _to_sparse(mass_entries)
-
-        if reporter is not None:
-            reporter.close()
+        overlap = final_matrices.get("overlap", coo_matrix((size, size)))
+        potential = final_matrices.get("potential", coo_matrix((size, size)))
+        kinetic = final_matrices.get("kinetic", coo_matrix((size, size)))
+        mass = final_matrices.get("mass", coo_matrix((size, size)))
 
         h_total = kinetic + mass + potential
         components = {
@@ -989,19 +1020,11 @@ class MatrixElementBuilder:
         scalars: _AssemblyScalars,
         reporter: Optional[_SimpleProgress],
         worker_count: int,
-    ) -> _ChunkResult:
+        chunk_dir: Path,
+    ) -> List[_ChunkResult]:
         chunks = self._make_row_chunks(size, worker_count)
         if not chunks:
-            return _ChunkResult(
-                overlap_entries={},
-                potential_entries={},
-                kinetic_entries={},
-                mass_entries={},
-                time_precompute=0.0,
-                time_kernel=0.0,
-                time_overhead=0.0,
-                pairs_processed=0,
-            )
+            return []
 
         ctx = mp.get_context("spawn")
         payload = _WorkerPayload(
@@ -1011,44 +1034,24 @@ class MatrixElementBuilder:
             size=size,
         )
 
-        overlap_entries: Dict[Tuple[int, int], float] = {}
-        potential_entries: Dict[Tuple[int, int], float] = {}
-        kinetic_entries: Dict[Tuple[int, int], float] = {}
-        mass_entries: Dict[Tuple[int, int], float] = {}
-        time_precompute = 0.0
-        time_kernel = 0.0
-        time_overhead = 0.0
-        pairs_processed = 0
-
+        chunk_tasks = [
+            (chunk_id, row_range, str(chunk_dir))
+            for chunk_id, row_range in enumerate(chunks)
+        ]
+        chunk_results: List[_ChunkResult] = []
         with ctx.Pool(
             processes=worker_count,
             initializer=_parallel_worker_init,
             initargs=(payload,),
         ) as pool:
             for chunk in pool.imap_unordered(
-                _parallel_process_chunk, chunks, chunksize=1
+                _parallel_process_chunk, chunk_tasks, chunksize=1
             ):
-                self._merge_entries(overlap_entries, chunk.overlap_entries)
-                self._merge_entries(potential_entries, chunk.potential_entries)
-                self._merge_entries(kinetic_entries, chunk.kinetic_entries)
-                self._merge_entries(mass_entries, chunk.mass_entries)
-                time_precompute += chunk.time_precompute
-                time_kernel += chunk.time_kernel
-                time_overhead += chunk.time_overhead
-                pairs_processed += chunk.pairs_processed
+                chunk_results.append(chunk)
                 if reporter is not None and chunk.pairs_processed:
                     reporter.update(chunk.pairs_processed)
 
-        return _ChunkResult(
-            overlap_entries=overlap_entries,
-            potential_entries=potential_entries,
-            kinetic_entries=kinetic_entries,
-            mass_entries=mass_entries,
-            time_precompute=time_precompute,
-            time_kernel=time_kernel,
-            time_overhead=time_overhead,
-            pairs_processed=pairs_processed,
-        )
+        return chunk_results
 
     def _assemble_rows(
         self,
@@ -1058,6 +1061,8 @@ class MatrixElementBuilder:
         row_start: int,
         row_end: int,
         reporter: Optional[_SimpleProgress],
+        chunk_id: int,
+        chunk_dir: Path,
     ) -> _ChunkResult:
         overlap_entries: Dict[Tuple[int, int], float] = {}
         potential_entries: Dict[Tuple[int, int], float] = {}
@@ -1070,14 +1075,12 @@ class MatrixElementBuilder:
 
         if row_start >= row_end:
             return _ChunkResult(
-                overlap_entries,
-                potential_entries,
-                kinetic_entries,
-                mass_entries,
-                time_precompute,
-                time_kernel,
-                time_overhead,
-                pairs_processed,
+                chunk_id=chunk_id,
+                chunk_paths={},
+                time_precompute=time_precompute,
+                time_kernel=time_kernel,
+                time_overhead=time_overhead,
+                pairs_processed=pairs_processed,
             )
 
         for row in range(row_start, row_end):
@@ -1209,16 +1212,36 @@ class MatrixElementBuilder:
                 pairs_processed += 1
                 if reporter is not None:
                     reporter.update()
+        write_start = time.perf_counter()
+        chunk_paths: Dict[str, str] = {}
+        matrices = {
+            "overlap": overlap_entries,
+            "potential": potential_entries,
+            "kinetic": kinetic_entries,
+            "mass": mass_entries,
+        }
+
+        for key, entries in matrices.items():
+            if not entries:
+                continue
+            rows, cols, data = zip(*((i, j, v)
+                                   for (i, j), v in entries.items()))
+            sparse_chunk = coo_matrix(
+                (data, (rows, cols)), shape=(size, size)).tocsr()
+            file_path = chunk_dir / f"chunk_{chunk_id:04d}_{key}.npz"
+            save_npz(file_path, sparse_chunk)
+            chunk_paths[key] = str(file_path)
+            entries.clear()
+
+        time_overhead += time.perf_counter() - write_start
 
         return _ChunkResult(
-            overlap_entries,
-            potential_entries,
-            kinetic_entries,
-            mass_entries,
-            time_precompute,
-            time_kernel,
-            time_overhead,
-            pairs_processed,
+            chunk_id=chunk_id,
+            chunk_paths=chunk_paths,
+            time_precompute=time_precompute,
+            time_kernel=time_kernel,
+            time_overhead=time_overhead,
+            pairs_processed=pairs_processed,
         )
 
     def _resolve_worker_count(self) -> int:
@@ -1252,17 +1275,6 @@ class MatrixElementBuilder:
             chunks.append((start, end))
             start = end
         return chunks
-
-    @staticmethod
-    def _merge_entries(
-        target: Dict[Tuple[int, int], float],
-        source: Dict[Tuple[int, int], float],
-    ) -> None:
-        for key, value in source.items():
-            if key in target:
-                target[key] += value
-            else:
-                target[key] = value
 
     def _angular_components(
         self,
@@ -1491,14 +1503,16 @@ def _parallel_worker_init(payload: _WorkerPayload) -> None:
     _WORKER_PAYLOAD = payload
 
 
-def _parallel_process_chunk(row_range: Tuple[int, int]) -> _ChunkResult:
+def _parallel_process_chunk(task: Tuple[int, Tuple[int, int], str]) -> _ChunkResult:
     if _WORKER_PAYLOAD is None:
         raise RuntimeError("Worker payload is not initialized.")
     builder = _WORKER_PAYLOAD.builder
     expanded_states = _WORKER_PAYLOAD.expanded_states
     scalars = _WORKER_PAYLOAD.scalars
     size = _WORKER_PAYLOAD.size
+    chunk_id, row_range, chunk_dir_str = task
     start, end = row_range
+    chunk_dir = Path(chunk_dir_str)
     return builder._assemble_rows(
         expanded_states,
         size,
@@ -1506,4 +1520,6 @@ def _parallel_process_chunk(row_range: Tuple[int, int]) -> _ChunkResult:
         start,
         end,
         reporter=None,
+        chunk_id=chunk_id,
+        chunk_dir=chunk_dir,
     )

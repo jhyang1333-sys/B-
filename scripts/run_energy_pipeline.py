@@ -47,7 +47,7 @@ def main() -> None:
     args = parse_args()
 
     tau = 0.038
-    r_max = 20.0
+    r_max = 200.0
     k = 7
     n = 20
     l_max = 2
