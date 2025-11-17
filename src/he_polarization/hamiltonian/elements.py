@@ -339,7 +339,7 @@ def _compute_element_numba(
                     col_d2r1 = d2_r1_col * col_r2
                     col_d2r2 = col_r1 * d2_r2_col
 
-                    measure = (r1 * r1) * (r2 * r2)
+                    measure = 1.0
                     potential_pref = -2.0 / r1 - 2.0 / r2
 
                     if r1 != 0.0:
@@ -879,7 +879,7 @@ class MatrixElementBuilder:
         pref_second = -0.5 / mu if mu != 0.0 else 0.0
         pref_first = -1.0 / mu if mu != 0.0 else 0.0
         pref_centrifugal = 0.5 / mu if mu != 0.0 else 0.0
-        pref_cross = -0.25 / M if M != 0.0 else 0.0
+        pref_cross = -0.5 / M if M != 0.0 else 0.0
         pref_mu_first_extra = pref_second
         pref_mass_first_extra = 0.5 / M if M != 0.0 else 0.0
         pref_mu_mix = pref_second

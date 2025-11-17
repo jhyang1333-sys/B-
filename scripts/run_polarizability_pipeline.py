@@ -20,7 +20,7 @@ from he_polarization.observables.dipole import (
     build_dipole_matrix,
     build_velocity_gauge_matrix,
 )
-from he_polarization.solver import OverlapConditioner
+from he_polarization.solver import ChannelOrthogonalizer, OverlapConditioner
 
 
 def parse_args() -> argparse.Namespace:
@@ -45,10 +45,10 @@ def main() -> None:
     args = parse_args()
 
     tau = 0.038
-    r_max = 20.0
-    k = 3
-    n = 8
-    l_max = 1
+    r_max = 150.0
+    k = 7
+    n = 20
+    l_max = 3
 
     config = ExponentialNodeConfig(
         r_min=0.0, r_max=r_max, k=k, n=n, gamma=r_max * tau)
@@ -81,8 +81,10 @@ def main() -> None:
         config.r_min, config.r_max, n_points=8)
 
     overlap_conditioner = OverlapConditioner()
+    channel_ortho = ChannelOrthogonalizer()
     calculator = EnergyCalculator(
         builder=builder,
+        channel_orthogonalizer=channel_ortho,
         overlap_conditioner=overlap_conditioner,
     )
 
@@ -104,6 +106,9 @@ def main() -> None:
         "overlap_conditioning_mode": overlap_conditioner.mode,
         "overlap_conditioning_regularization": overlap_conditioner.regularization,
         "overlap_conditioning_enabled": True,
+        "channel_ortho_tol": channel_ortho.tolerance,
+        "channel_ortho_max_dim": channel_ortho.max_block_dim,
+        "channel_ortho_enabled": True,
     }
 
     cache = SolverResultCache(args.cache_dir)

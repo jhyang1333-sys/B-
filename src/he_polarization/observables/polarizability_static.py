@@ -58,5 +58,8 @@ class StaticPolarizabilityCalculator:
         numerator = 2.0 * (length_value - velocity_value)
         denominator = length_value + velocity_value
         if np.isclose(denominator, 0.0):
-            raise ZeroDivisionError("极化率求和结果出现抵消导致分母为零。")
+            # Avoid crashing when both gauges yield near-zero polarizabilities.
+            if np.isclose(numerator, 0.0):
+                return 0.0
+            return float(np.sign(numerator) * np.inf)
         return float(numerator / denominator)

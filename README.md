@@ -3,6 +3,8 @@
 ##### 傻瓜版使用教程
 
 本代码按照《氦原子体系能级与极化率的高精度计算》中的公式与数值流程，构建了从基函数生成、哈密顿矩阵装配到极化率评估的完整 Python 实现。核心矩阵均以稀疏格式存储，可支撑大规模 B 样条基组的数值实验。可以按照本指南的步骤完成安装、运行并查看输出结果。
+
+> **HBS 基组修正说明**：逐通道正交与重叠调节的具体实现细节与调参建议已整理至 `HBS基组修正记录.md`，如需了解修复背景或更改容差，请先查阅该文档。若需对照论文中的目标能量与极化率，请参见 `docs/precision_targets.md`。
 > 附带论文《[氦原子体系能级与极化率的高精度计算](氦原子体系能级与极化率的高精度计算_杨三江.pdf)》与[hamiltonian_operator_mapping](hamiltonian_operator_mapping.md)（论文里没写但是至关重要的推导与结果）
 
 ## 0. 我该怎么开始？（最简步骤）
@@ -123,6 +125,10 @@ pip install -e .
     - 生成指数型 B 样条节点与角动量通道。
     - 通过 `MatrixElementBuilder.assemble_matrices` 生成稀疏 `H`、`O` 及各分量矩阵（支持 `--progress` 开启装配进度条）。
     - 调用 `EnergyCalculator.diagonalize`（默认稀疏迭代求解）输出目标本征值与向量，并提供 Hellmann 判据。
+    - 新增 `--channel-ortho-*` 与 `--overlap-conditioning-*` 参数，用于分别控制逐通道正交与全局重叠矩阵调节；需要禁用可加 `--disable-channel-orthogonalization` 或 `--disable-overlap-conditioning`，大体系下可将 `--overlap-conditioning-mode` 改为 `regularize` 并设定 `--overlap-conditioning-regularization`。
+- `run_precision_scan.py`
+    - 预置多个与论文匹配的参数集，可使用 `--stage baseline` 等选项逐步放大基组。
+    - 每个阶段自动记录基函数数量、目标能量的绝对误差以及 Hellmann 判据，便于判断是否达到 `docs/precision_targets.md` 中的阈值。
 - `run_polarizability_pipeline.py`
     - 复用能量结果，进一步构建稀疏偶极矩阵与速度规范动量矩阵。
     - 计算指定态的静态极化率，并在终端打印长度/速度规范匹配情况。

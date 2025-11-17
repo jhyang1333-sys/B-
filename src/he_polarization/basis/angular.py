@@ -77,8 +77,11 @@ class AngularCoupling:
             return 0.0
         if not self._triangle_condition(l2p, q, l2):
             return 0.0
+        dims = math.sqrt((2 * l1 + 1) * (2 * l2 + 1) *
+                         (2 * l1p + 1) * (2 * l2p + 1))
 
-        prefactor = (-1) ** (l1 + l2 + Lp) * (2 * q + 1)
+        prefactor = (-1) ** (l1 + l2 + Lp) * (2 * q + 1) * dims
+
         three1 = self.wigner_3j(l1p, q, l1, 0, 0, 0)
         if abs(three1) < 1e-14:
             return 0.0

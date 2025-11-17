@@ -17,7 +17,8 @@ from he_polarization.io import SolverResultCache
 from he_polarization.numerics import generate_tensor_product_quadrature
 from he_polarization.observables import EnergyCalculator
 from he_polarization.observables.expectation import expectation_from_matrix
-from he_polarization.solver import OverlapConditioner
+from he_polarization.solver import ChannelOrthogonalizer, OverlapConditioner
+from he_polarization.solver import IterativeSolverConfig  # 确保导入这个类
 
 
 def parse_args() -> argparse.Namespace:
@@ -41,6 +42,12 @@ def parse_args() -> argparse.Namespace:
                         help="Number of worker processes for matrix assembly (default: auto).")
     parser.add_argument("--assembly-chunk-rows", type=int, default=None,
                         help="Number of consecutive matrix rows per worker chunk.")
+    parser.add_argument("--disable-channel-orthogonalization", action="store_true",
+                        help="Disable per-channel orthonormalization (default: enabled).")
+    parser.add_argument("--channel-ortho-tol", type=float, default=1e-10,
+                        help="Eigenvalue tolerance for channel-wise pruning.")
+    parser.add_argument("--channel-ortho-max-dim", type=int, default=512,
+                        help="Largest channel block size handled via dense eigendecomposition.")
     parser.add_argument("--disable-overlap-conditioning", action="store_true",
                         help="Disable overlap-matrix stabilization (default: enabled).")
     parser.add_argument("--overlap-conditioning-tol", type=float, default=1e-10,
@@ -57,11 +64,13 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
+    # --- 关键修改 1：使用数值稳定的论文参数 (Yang 2019) ---
     tau = 0.038
-    r_max = 20.0
-    k = 5
-    n = 5
-    l_max = 2
+    r_max = 150.0   # <--- 必须足够大
+    k = 7           # <--- 必须是高阶
+    n = 20          # <--- 节点数配合 r_max
+    l_max = 3
+    # ----------------------------------------------------
 
     config = ExponentialNodeConfig(
         r_min=0.0, r_max=r_max, k=k, n=n, gamma=r_max * tau)
@@ -99,6 +108,13 @@ def main() -> None:
     points, weights = generate_tensor_product_quadrature(
         config.r_min, config.r_max, n_points=8)
 
+    channel_ortho = None
+    if not args.disable_channel_orthogonalization:
+        channel_ortho = ChannelOrthogonalizer(
+            tolerance=args.channel_ortho_tol,
+            max_block_dim=args.channel_ortho_max_dim,
+        )
+
     conditioner = None
     if (not args.disable_overlap_conditioning) and args.overlap_conditioning_mode != "off":
         conditioner = OverlapConditioner(
@@ -109,7 +125,10 @@ def main() -> None:
         )
 
     calculator = EnergyCalculator(
-        builder=builder, overlap_conditioner=conditioner)
+        builder=builder,
+        channel_orthogonalizer=channel_ortho,
+        overlap_conditioner=conditioner,
+    )
 
     metadata = {
         "tau": tau,
@@ -129,6 +148,9 @@ def main() -> None:
         "overlap_conditioning_mode": args.overlap_conditioning_mode,
         "overlap_conditioning_regularization": args.overlap_conditioning_regularization,
         "overlap_conditioning_enabled": conditioner is not None,
+        "channel_ortho_tol": args.channel_ortho_tol,
+        "channel_ortho_max_dim": args.channel_ortho_max_dim,
+        "channel_ortho_enabled": channel_ortho is not None,
     }
 
     cache = SolverResultCache(args.cache_dir)
@@ -138,12 +160,23 @@ def main() -> None:
         eigenvectors = cached.eigenvectors
         components = cached.components
     else:
+        # --- 关键修改 2：配置 Shift-Invert 求解器 ---
+        solver_cfg = IterativeSolverConfig(
+            num_eigenvalues=args.num_eigenvalues,
+            tol=1e-12,
+            sigma=-2.90372,  # <--- 目标能量（物理基态）
+            # <--- 寻找最接近 sigma 的本征值 (Largest Magnitude of 1/(E-sigma))
+            which="LM"
+        )
+        # ------------------------------------------
+
         energies, eigenvectors, components = calculator.diagonalize(
             basis_states,
             weights=weights,
             points=points,
             num_eigenvalues=args.num_eigenvalues,
             progress="矩阵装配进度" if args.progress else None,
+            solver_config=solver_cfg,  # <--- 务必传入配置
         )
 
         cache_components = dict(components)
@@ -164,24 +197,17 @@ def main() -> None:
                 metadata=metadata,
             )
 
-    # ground_vec = eigenvectors[:, 0]
-    # kinetic_expect = expectation_from_matrix(ground_vec, components["kinetic"])
-    # potential_expect = expectation_from_matrix(
-    #    ground_vec, components["potential"])
-    # eta = calculator.hellmann_eta(
-    #    expect_T=kinetic_expect, expect_V=potential_expect)
-
     ground_vec = eigenvectors[:, 0]
     kinetic_mu_expect = expectation_from_matrix(
         ground_vec, components["kinetic"])
     mass_expect = expectation_from_matrix(ground_vec, components["mass"])
-    total_kinetic_expect = kinetic_mu_expect + mass_expect  # <--- 加上质量项
+    total_kinetic_expect = kinetic_mu_expect + mass_expect
 
     potential_expect = expectation_from_matrix(
         ground_vec, components["potential"])
 
     eta = calculator.hellmann_eta(
-        expect_T=total_kinetic_expect, expect_V=potential_expect)  # <--- 使用总动能
+        expect_T=total_kinetic_expect, expect_V=potential_expect)
 
     print("最低几个能级 (a.u.):")
     for idx, energy in enumerate(energies[:5]):
