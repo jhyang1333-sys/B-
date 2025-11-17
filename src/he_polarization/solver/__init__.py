@@ -5,9 +5,11 @@ from .iterative_generalized_eigen import (
     IterativeSolverConfig,
     solve_sparse_generalized_eigen,
 )
+from .conditioning import OverlapConditioner
 
 __all__ = [
     "solve_generalized_eigen",
     "solve_sparse_generalized_eigen",
     "IterativeSolverConfig",
+    "OverlapConditioner",
 ]

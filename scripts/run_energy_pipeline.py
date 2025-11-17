@@ -17,6 +17,7 @@ from he_polarization.io import SolverResultCache
 from he_polarization.numerics import generate_tensor_product_quadrature
 from he_polarization.observables import EnergyCalculator
 from he_polarization.observables.expectation import expectation_from_matrix
+from he_polarization.solver import OverlapConditioner
 
 
 def parse_args() -> argparse.Namespace:
@@ -40,6 +41,16 @@ def parse_args() -> argparse.Namespace:
                         help="Number of worker processes for matrix assembly (default: auto).")
     parser.add_argument("--assembly-chunk-rows", type=int, default=None,
                         help="Number of consecutive matrix rows per worker chunk.")
+    parser.add_argument("--disable-overlap-conditioning", action="store_true",
+                        help="Disable overlap-matrix stabilization (default: enabled).")
+    parser.add_argument("--overlap-conditioning-tol", type=float, default=1e-10,
+                        help="Eigenvalue tolerance used when pruning ill-conditioned overlap modes.")
+    parser.add_argument("--overlap-conditioning-max-dim", type=int, default=4096,
+                        help="Largest basis dimension allowed for dense overlap conditioning.")
+    parser.add_argument("--overlap-conditioning-mode", choices=["auto", "dense", "regularize", "off"], default="auto",
+                        help="Conditioning strategy: auto switches to regularization once the basis exceeds the dense limit.")
+    parser.add_argument("--overlap-conditioning-regularization", type=float, default=1e-8,
+                        help="Diagonal shift added when using the regularize strategy.")
     return parser.parse_args()
 
 
@@ -47,9 +58,9 @@ def main() -> None:
     args = parse_args()
 
     tau = 0.038
-    r_max = 200.0
-    k = 7
-    n = 20
+    r_max = 20.0
+    k = 5
+    n = 5
     l_max = 2
 
     config = ExponentialNodeConfig(
@@ -88,7 +99,17 @@ def main() -> None:
     points, weights = generate_tensor_product_quadrature(
         config.r_min, config.r_max, n_points=8)
 
-    calculator = EnergyCalculator(builder=builder)
+    conditioner = None
+    if (not args.disable_overlap_conditioning) and args.overlap_conditioning_mode != "off":
+        conditioner = OverlapConditioner(
+            tolerance=args.overlap_conditioning_tol,
+            max_dense_dim=args.overlap_conditioning_max_dim,
+            mode=args.overlap_conditioning_mode,
+            regularization=args.overlap_conditioning_regularization,
+        )
+
+    calculator = EnergyCalculator(
+        builder=builder, overlap_conditioner=conditioner)
 
     metadata = {
         "tau": tau,
@@ -103,6 +124,11 @@ def main() -> None:
         "unique_pairs": True,
         "basis_size": len(basis_states),
         "mu": mu,
+        "overlap_conditioning_tol": args.overlap_conditioning_tol,
+        "overlap_conditioning_max_dim": args.overlap_conditioning_max_dim,
+        "overlap_conditioning_mode": args.overlap_conditioning_mode,
+        "overlap_conditioning_regularization": args.overlap_conditioning_regularization,
+        "overlap_conditioning_enabled": conditioner is not None,
     }
 
     cache = SolverResultCache(args.cache_dir)

@@ -20,6 +20,7 @@ from he_polarization.observables.dipole import (
     build_dipole_matrix,
     build_velocity_gauge_matrix,
 )
+from he_polarization.solver import OverlapConditioner
 
 
 def parse_args() -> argparse.Namespace:
@@ -79,7 +80,11 @@ def main() -> None:
     points, weights = generate_tensor_product_quadrature(
         config.r_min, config.r_max, n_points=8)
 
-    calculator = EnergyCalculator(builder=builder)
+    overlap_conditioner = OverlapConditioner()
+    calculator = EnergyCalculator(
+        builder=builder,
+        overlap_conditioner=overlap_conditioner,
+    )
 
     metadata = {
         "tau": tau,
@@ -94,6 +99,11 @@ def main() -> None:
         "unique_pairs": True,
         "basis_size": len(basis_states),
         "mu": mu,
+        "overlap_conditioning_tol": overlap_conditioner.tolerance,
+        "overlap_conditioning_max_dim": overlap_conditioner.max_dense_dim,
+        "overlap_conditioning_mode": overlap_conditioner.mode,
+        "overlap_conditioning_regularization": overlap_conditioner.regularization,
+        "overlap_conditioning_enabled": True,
     }
 
     cache = SolverResultCache(args.cache_dir)

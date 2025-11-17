@@ -11,6 +11,7 @@ from he_polarization.basis.functions import HylleraasBSplineFunction
 from he_polarization.hamiltonian.elements import MatrixElementBuilder
 from he_polarization.solver import (
     IterativeSolverConfig,
+    OverlapConditioner,
     solve_generalized_eigen,
     solve_sparse_generalized_eigen,
 )
@@ -23,6 +24,7 @@ class EnergyCalculator:
     """包装能级求解与外推策略。"""
 
     builder: MatrixElementBuilder
+    overlap_conditioner: OverlapConditioner | None = None
 
     def diagonalize(
         self,
@@ -42,17 +44,36 @@ class EnergyCalculator:
         """对广义本征问题进行求解，返回能量与系数矩阵。"""
         H, O, components = self.builder.assemble_matrices(
             basis_states, weights=weights, points=points, progress=progress)
-        if _should_use_iterative_solver(H, O, num_eigenvalues):
+
+        conditioned = self.overlap_conditioner.condition(
+            H, O) if self.overlap_conditioner else (H, O, None, None)
+        H_eff, O_eff, back_transform, metadata = conditioned
+        if metadata:
+            if metadata.strategy == "dense" and metadata.discarded_dimension:
+                print(
+                    "Overlap conditioning removed "
+                    f"{metadata.discarded_dimension} states (min λ={metadata.min_kept_eigenvalue:.2e})."
+                )
+            elif metadata.strategy == "regularize" and self.overlap_conditioner is not None:
+                print(
+                    "Overlap conditioning added diagonal regularization "
+                    f"(ε={self.overlap_conditioner.regularization:.2e})."
+                )
+
+        if _should_use_iterative_solver(H_eff, O_eff, num_eigenvalues):
             config = solver_config or IterativeSolverConfig()
             if num_eigenvalues is not None:
                 config = replace(config, num_eigenvalues=num_eigenvalues)
             eigvals, eigvecs = solve_sparse_generalized_eigen(
-                H, O, config=config)
+                H_eff, O_eff, config=config)
         else:
             eigvals, eigvecs = solve_generalized_eigen(
-                cast(Any, H),
-                cast(Any, O),
+                cast(Any, H_eff),
+                cast(Any, O_eff),
             )
+
+        if back_transform is not None:
+            eigvecs = back_transform(eigvecs)
         return eigvals, eigvecs, components
 
     def extrapolate(self, energies: np.ndarray, n_values: np.ndarray) -> Tuple[float, float]:
@@ -67,10 +88,12 @@ class EnergyCalculator:
 
 
 def _should_use_iterative_solver(H, O, num_eigenvalues: int | None) -> bool:
-    if num_eigenvalues is not None:
-        return True
     try:
         from scipy.sparse import issparse
     except ModuleNotFoundError:
-        return False
+        def issparse(_):  # type: ignore
+            return False
+
+    if num_eigenvalues is not None:
+        return True
     return issparse(H) or issparse(O)
