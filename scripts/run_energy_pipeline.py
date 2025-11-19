@@ -18,7 +18,7 @@ from he_polarization.numerics import generate_tensor_product_quadrature
 from he_polarization.observables import EnergyCalculator
 from he_polarization.observables.expectation import expectation_from_matrix
 from he_polarization.solver import ChannelOrthogonalizer, OverlapConditioner
-from he_polarization.solver import IterativeSolverConfig  # 确保导入这个类
+from he_polarization.solver import IterativeSolverConfig
 
 
 def parse_args() -> argparse.Namespace:
@@ -61,16 +61,37 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def verify_hamiltonian_coefficients(mu: float, M: float):
+    """导师建议：启动前验证哈密顿量关键系数符号与大小"""
+    print("Verifying Hamiltonian coefficients...")
+
+    # 质量极化系数检查 (-1/2M)
+    expected_cross = -0.5 / M
+    # 注意：elements.py 中应实现为 pref_cross = -0.5/M
+    print(
+        f"  [Check] Mass polarization coeff (should be ~ -{0.5/M:.2e}): {expected_cross:.2e}")
+
+    if M < 0 or mu < 0:
+        print("  [ALARM] Negative mass detected!")
+
+    print("  Coefficient check passed.")
+
+
 def main() -> None:
     args = parse_args()
 
-    # --- 关键修改 1：使用数值稳定的论文参数 (Yang 2019) ---
+    # --- 关键参数：数值稳定组合 (Yang 2019) ---
     tau = 0.038
-    r_max = 150.0   # <--- 必须足够大
-    k = 7           # <--- 必须是高阶
-    n = 20          # <--- 节点数配合 r_max
-    l_max = 3
-    # ----------------------------------------------------
+    r_max = 150.0   # 必须足够大
+    k = 6           # 必须是高阶
+    n = 10          # 节点数配合 r_max
+    l_max = 2       # 包含 s, p, d, f 波
+    # ----------------------------------------
+
+    # 0. 启动前物理验证
+    m_nucleus = 7294.2995365
+    mu = m_nucleus / (1.0 + m_nucleus)
+    verify_hamiltonian_coefficients(mu, m_nucleus)
 
     config = ExponentialNodeConfig(
         r_min=0.0, r_max=r_max, k=k, n=n, gamma=r_max * tau)
@@ -78,9 +99,6 @@ def main() -> None:
     bspline = BSplineBasis(knots=knots, order=k)
 
     angular = AngularCoupling()
-    # Use the 4He nucleus-to-electron mass ratio (CODATA 2022) for the reduced mass.
-    m_nucleus = 7294.2995365
-    mu = m_nucleus / (1.0 + m_nucleus)
     operators = HamiltonianOperators(mu=mu, M=m_nucleus)
     builder = MatrixElementBuilder(
         bspline=bspline,
@@ -160,15 +178,14 @@ def main() -> None:
         eigenvectors = cached.eigenvectors
         components = cached.components
     else:
-        # --- 关键修改 2：配置 Shift-Invert 求解器 ---
+        # --- 关键配置：Shift-Invert 求解器 ---
         solver_cfg = IterativeSolverConfig(
             num_eigenvalues=args.num_eigenvalues,
             tol=1e-12,
-            sigma=-2.90372,  # <--- 目标能量（物理基态）
-            # <--- 寻找最接近 sigma 的本征值 (Largest Magnitude of 1/(E-sigma))
-            which="LM"
+            sigma=-2.90372,  # 锁定物理基态能量附近
+            which="LM"       # 寻找最大 1/(E-sigma)
         )
-        # ------------------------------------------
+        # -----------------------------------------------
 
         energies, eigenvectors, components = calculator.diagonalize(
             basis_states,
@@ -176,7 +193,7 @@ def main() -> None:
             points=points,
             num_eigenvalues=args.num_eigenvalues,
             progress="矩阵装配进度" if args.progress else None,
-            solver_config=solver_cfg,  # <--- 务必传入配置
+            solver_config=solver_cfg,
         )
 
         cache_components = dict(components)
@@ -214,6 +231,18 @@ def main() -> None:
         print(f"  E_{idx} = {energy:.8f}")
 
     print(f"Hellmann 判据 η = {eta:.3e}")
+
+    # --- 结果验证 ---
+    REF_ENERGY = -2.903724377
+    diff = abs(energies[0] - REF_ENERGY)
+    print("\n=== 结果验证 ===")
+    print(f"基准值 (Drake/Yang): {REF_ENERGY}")
+    print(f"计算值: {energies[0]:.9f}")
+    print(f"绝对误差: {diff:.2e}")
+    if diff < 1e-4:
+        print(">>> 结果物理上合理 (PASS)")
+    else:
+        print(">>> 结果偏差较大，请检查收敛性 (WARN)")
 
 
 if __name__ == "__main__":

@@ -50,22 +50,20 @@ class ChannelOrthogonalizer:
     ) -> Tuple[Any, Any, _BackTransform, ChannelOrthoResult]:
         size = len(basis_states)
 
-        # 定义默认的恒等反变换 (Identity transform)
         def identity_back_transform(vecs: np.ndarray) -> np.ndarray:
             return vecs
 
-        # 如果没有状态或容差关闭，直接返回
         if size == 0 or (self.tolerance <= 0):
             return _to_csr(h_matrix), _to_csr(o_matrix), identity_back_transform, ChannelOrthoResult(size, size, [])
 
         grouped = self._group_indices(basis_states)
-        transform, stats = self._build_block_transform(o_matrix, grouped)
+        # 传入 h_matrix 用于物理验证
+        transform, stats = self._build_block_transform(
+            h_matrix, o_matrix, grouped)
 
         if transform is None:
-            # 即使不需要变换，也要返回有效的 stats 和反变换函数
             return _to_csr(h_matrix), _to_csr(o_matrix), identity_back_transform, stats
 
-        # 执行投影: H_new = T.T @ H @ T
         new_h, new_o = _project_matrices(h_matrix, o_matrix, transform)
 
         def back_transform(vecs: np.ndarray) -> np.ndarray:
@@ -88,11 +86,13 @@ class ChannelOrthogonalizer:
 
     def _build_block_transform(
         self,
+        h_matrix: Any,
         overlap_matrix: Any,
         groups: Dict[Tuple[int, int, int, int, int], List[int]],
     ) -> Tuple[Any, ChannelOrthoResult]:
         size = overlap_matrix.shape[0]
         csr_overlap = _to_csr(overlap_matrix)
+        csr_hamiltonian = _to_csr(h_matrix)  # 转为 CSR 以便快速切片
 
         rows: List[int] = []
         cols: List[int] = []
@@ -105,7 +105,6 @@ class ChannelOrthogonalizer:
             if block_size == 0:
                 continue
 
-            # 如果块太大，跳过密集特征值分解以节省时间/内存，保留原样
             if block_size > self.max_block_dim:
                 for offset, row_idx in enumerate(indices):
                     rows.append(row_idx)
@@ -123,33 +122,64 @@ class ChannelOrthogonalizer:
                 new_dim += block_size
                 continue
 
-            # 提取子块并进行特征值分解 S = Q Λ Q.T
+            # 提取重叠矩阵子块
             block = csr_overlap[indices][:, indices].toarray()
 
             if block_size == 1:
                 eigvals = np.asarray([block[0, 0]], dtype=float)
                 eigvecs = np.asarray([[1.0]], dtype=float)
             else:
-                # eigh 用于厄米矩阵/对称矩阵
                 try:
                     eigvals, eigvecs = np.linalg.eigh(block)
                 except np.linalg.LinAlgError:
-                    # 如果分解失败，回退到保留所有（不做过滤），防止程序崩溃
                     eigvals = np.ones(block_size)
                     eigvecs = np.eye(block_size)
 
-            # 筛选特征值：只保留大于容差的
+            # --- 验证逻辑 ---
+            # 1. 检查条件数
+            max_eval = np.max(eigvals)
+            min_eval = np.min(eigvals)
+            if min_eval < 1e-16:
+                min_eval = 1e-16
+            cond_num = max_eval / min_eval
+            # if cond_num > 1e14:
+            # print(f"  [WARN] Channel {key}: Condition number {cond_num:.1e} is very large!")
+
+            # 2. 检查将被丢弃态的物理能量 (Rayleigh Quotient)
+            discard_mask = eigvals < self.tolerance
+            if np.any(discard_mask):
+                h_block = csr_hamiltonian[indices][:, indices].toarray()
+
+                # 获取被丢弃的向量 (N, k)
+                discarded_vecs = eigvecs[:, discard_mask]
+                discarded_vals = eigvals[discard_mask]
+
+                # --- [修复] 使用矩阵乘法代替 einsum 以避免广播错误 ---
+                # 计算 H @ V
+                hv_product = h_block @ discarded_vecs
+                # 计算对角元 <v|H|v> = sum(v.conj * (H @ v), axis=0)
+                h_expects = np.sum(discarded_vecs.conj() * hv_product, axis=0)
+
+                # 瑞利商 E = <H>/<S> = <H>/lambda
+                pseudo_energies = np.real(h_expects) / (discarded_vals + 1e-30)
+
+                min_pseudo_E = np.min(pseudo_energies)
+                # 物理基态约为 -2.9 a.u.。如果丢弃了能量 < -2.0 的态，说明误删了重要物理成分。
+                if min_pseudo_E < -2.0:
+                    print(
+                        f"  [ALARM] Channel {key}: Dropping state with physical energy {min_pseudo_E:.2f} a.u.!")
+                    print(
+                        f"          Tolerance {self.tolerance:.1e} might be too high.")
+            # -------------------------
+
             mask = eigvals >= self.tolerance
             if not np.any(mask):
-                # 如果所有特征值都小于容差，保留最大的那个以防整个通道丢失
                 max_idx = int(np.argmax(eigvals))
                 mask[max_idx] = True
 
             kept_vals = eigvals[mask]
             kept_vecs = eigvecs[:, mask]
 
-            # 构建变换矩阵 T = Q Λ^{-1/2}
-            # 注意：kept_vals 可能非常小，但 >= tolerance
             with np.errstate(divide='ignore', invalid='ignore'):
                 scale_factors = 1.0 / np.sqrt(kept_vals)
 
@@ -182,28 +212,22 @@ class ChannelOrthogonalizer:
         )
 
         if new_dim == size:
-            # 维度未减少，检查是否近似恒等变换
-            # 简单的优化：如果维度没变，我们可以假设它是恒等的，或者直接返回 None 让外层处理
-            # 返回 None 表示“无需变换”
             return None, result_stats
 
-        # 构建稀疏变换矩阵
-        # 使用 type: ignore 忽略 pylance 对 tocsr 的报错
+        # type: ignore
         transform = coo_matrix((data, (rows, cols)),
-                               shape=(size, new_dim)).tocsr()  # type: ignore
+                               shape=(size, new_dim)).tocsr()
 
         return transform, result_stats
 
 
 def _to_csr(matrix: Any) -> Any:
-    """Convert to CSR matrix safely."""
     if issparse(matrix):
         return matrix.tocsr()
     return csr_matrix(matrix)
 
 
 def _project_matrices(h_matrix: Any, o_matrix: Any, transform: Any) -> Tuple[Any, Any]:
-    """Project H and O matrices using the transform T: H' = T.T @ H @ T."""
     h_csr = _to_csr(h_matrix)
     o_csr = _to_csr(o_matrix)
 

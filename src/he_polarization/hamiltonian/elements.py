@@ -270,6 +270,9 @@ def _compute_element_numba(
     gauss_size = gauss_nodes.shape[0]
     n_knots = knots.shape[0] - 1
 
+    # 动能弱形式系数: 1/(2mu)。 pref_second 是 -0.5/mu，所以取反。
+    pref_kinetic_weak = -pref_second
+
     for seg_r1_idx in range(n_knots):
         seg_left_r1 = knots[seg_r1_idx]
         seg_right_r1 = knots[seg_r1_idx + 1]
@@ -306,10 +309,19 @@ def _compute_element_numba(
                     knots, r1, i1_row, bspline_order)
                 col_r1 = _bspline_recursive_njit(
                     knots, r1, i1_col, bspline_order)
+
+                # === 关键修改：计算 row 的导数 (用于弱形式动能) ===
+                d1_r1_row = _bspline_derivative_njit(
+                    knots, r1, i1_row, bspline_order, 1)
+                # ============================================
+
                 d1_r1_col = _bspline_derivative_njit(
                     knots, r1, i1_col, bspline_order, 1)
-                d2_r1_col = _bspline_derivative_njit(
-                    knots, r1, i1_col, bspline_order, 2)
+                # 注意：弱形式不需要 row 或 col 的二阶导数 (d2)
+
+                # 仍然计算 d2_r1_col 用于其他可能的混合项（如质量极化），如果需要的话。
+                # 但标准动能项已不需要。这里保留以防万一其他项用到。
+                # d2_r1_col = _bspline_derivative_njit(knots, r1, i1_col, bspline_order, 2)
 
                 for idx_r2 in range(gauss_size):
                     node_r2 = gauss_nodes[idx_r2]
@@ -321,45 +333,59 @@ def _compute_element_numba(
                         knots, r2, i2_row, bspline_order)
                     col_r2 = _bspline_recursive_njit(
                         knots, r2, i2_col, bspline_order)
+
+                    # === 关键修改：计算 row 的导数 (用于弱形式动能) ===
+                    d1_r2_row = _bspline_derivative_njit(
+                        knots, r2, i2_row, bspline_order, 1)
+                    # ============================================
+
                     d1_r2_col = _bspline_derivative_njit(
                         knots, r2, i2_col, bspline_order, 1)
-                    d2_r2_col = _bspline_derivative_njit(
-                        knots, r2, i2_col, bspline_order, 2)
+                    # d2_r2_col = _bspline_derivative_njit(knots, r2, i2_col, bspline_order, 2)
 
                     if r1 <= 0.0 or r2 <= 0.0:
                         continue
 
                     phi_row = row_r1 * row_r2
-                    if phi_row == 0.0:
+                    if phi_row == 0.0 and d1_r1_row == 0.0 and d1_r2_row == 0.0:
+                        # 优化：如果所有 row 相关项都为 0，则跳过
                         continue
 
                     phi_col = col_r1 * col_r2
                     col_dr1 = d1_r1_col * col_r2
                     col_dr2 = col_r1 * d1_r2_col
-                    col_d2r1 = d2_r1_col * col_r2
-                    col_d2r2 = col_r1 * d2_r2_col
+                    # col_d2r1 = d2_r1_col * col_r2
+                    # col_d2r2 = col_r1 * d2_r2_col
 
-                    measure = 1.0
+                    # === 关键修改：恢复体积元 ===
+                    measure = (r1 * r1) * (r2 * r2)
+                    # ==========================
+
                     potential_pref = -2.0 / r1 - 2.0 / r2
 
-                    if r1 != 0.0:
-                        ratio_mix_r1 = (r1 * r1 - r2 * r2) / r1
+                    # === 关键修改：数值稳定性增强 ===
+                    _EPS_DENOM = 1e-20
+
+                    if r1 > _EPS_DENOM:
+                        # (r1-r2)*(r1+r2) 避免大数相减误差
+                        ratio_mix_r1 = (r1 - r2) * (r1 + r2) / r1
                         ratio_j2 = r2 / r1
                     else:
                         ratio_mix_r1 = 0.0
                         ratio_j2 = 0.0
 
-                    if r2 != 0.0:
-                        ratio_mix_r2 = (r2 * r2 - r1 * r1) / r2
+                    if r2 > _EPS_DENOM:
+                        ratio_mix_r2 = (r2 - r1) * (r2 + r1) / r2
                         ratio_j1 = r1 / r2
                     else:
                         ratio_mix_r2 = 0.0
                         ratio_j1 = 0.0
 
-                    if r1 != 0.0 and r2 != 0.0:
+                    if r1 > _EPS_DENOM and r2 > _EPS_DENOM:
                         ratio_cross = (r1 * r1 + r2 * r2) / (r1 * r2)
                     else:
                         ratio_cross = 0.0
+                    # =============================
 
                     derivative_product = col_dr1 * col_dr2
 
@@ -388,11 +414,13 @@ def _compute_element_numba(
                         if g1 != 0.0:
                             coeff_g1 = coeff * g1
 
+                            # 交叠与势能
                             if phi_col != 0.0:
                                 base_overlap = measure_factor * phi_row * phi_col
                                 point_ol += coeff_g1 * base_overlap
                                 point_po += coeff_g1 * base_overlap * potential_pref
 
+                                # 离心势 (Angluar Kinetic Energy) - 保持原样
                                 if r1 != 0.0:
                                     point_ki += (
                                         coeff_g1
@@ -416,44 +444,34 @@ def _compute_element_numba(
                                         / (r2 * r2)
                                     )
 
-                            if col_d2r1 != 0.0:
-                                point_ki += (
-                                    coeff_g1
-                                    * pref_second
-                                    * measure_factor
-                                    * phi_row
-                                    * col_d2r1
-                                )
-                            if col_d2r2 != 0.0:
-                                point_ki += (
-                                    coeff_g1
-                                    * pref_second
-                                    * measure_factor
-                                    * phi_row
-                                    * col_d2r2
-                                )
-                            if col_dr1 != 0.0 and r1 != 0.0:
-                                point_ki += (
-                                    coeff_g1
-                                    * pref_first
-                                    * measure_factor
-                                    * phi_row
-                                    * col_dr1
-                                    / r1
-                                )
-                            if col_dr2 != 0.0 and r2 != 0.0:
-                                point_ki += (
-                                    coeff_g1
-                                    * pref_first
-                                    * measure_factor
-                                    * phi_row
-                                    * col_dr2
-                                    / r2
-                                )
+                            # === 关键修改：径向动能使用弱形式 (Weak Form) ===
+                            # T = <phi' | psi'> * (1/2mu)
+                            # 1. r1 方向: (d_row/dr1) * (d_col/dr1)
+                            if d1_r1_row != 0.0 and d1_r1_col != 0.0:
+                                # phi_row 的 r1 导数 = d1_r1_row * row_r2
+                                # phi_col 的 r1 导数 = d1_r1_col * col_r2
+                                # 乘积 = (d1_r1_row * d1_r1_col) * (row_r2 * col_r2)
+                                term_r1 = (d1_r1_row * d1_r1_col) * \
+                                    (row_r2 * col_r2)
+                                point_ki += coeff_g1 * pref_kinetic_weak * measure_factor * term_r1
+
+                            # 2. r2 方向: (d_row/dr2) * (d_col/dr2)
+                            if d1_r2_row != 0.0 and d1_r2_col != 0.0:
+                                # phi_row 的 r2 导数 = row_r1 * d1_r2_row
+                                # phi_col 的 r2 导数 = col_r1 * d1_r2_col
+                                term_r2 = (row_r1 * col_r1) * \
+                                    (d1_r2_row * d1_r2_col)
+                                point_ki += coeff_g1 * pref_kinetic_weak * measure_factor * term_r2
+                            # ==============================================
+
+                            # 强形式的二阶导数项已被移除 (pref_second)
+                            # 强形式的一阶导数项已被移除 (pref_first)
 
                             if c_col != 0 and (col_dr1 != 0.0 or col_dr2 != 0.0):
                                 factor_c = coeff_g1 * c_col
                                 if col_dr1 != 0.0 and r1 != 0.0:
+                                    # 关联项动能修正（这里保留原样，因为涉及到 dr12 的导数，
+                                    # 在 Hylleraas 坐标下混合导数通常以这种形式处理是标准做法）
                                     point_ki += (
                                         factor_c
                                         * pref_mu_first_extra
@@ -848,7 +866,6 @@ class MatrixElementBuilder:
     ) -> tuple[coo_matrix, coo_matrix, Dict[str, coo_matrix]]:
         """批量构建 ``H`` 与 ``O`` 以及单独的算符分量矩阵。"""
 
-        # 外部提供的张量积求积节点暂未使用，保留参数以兼容先前接口。
         _ = points, weights
 
         states = [
@@ -879,7 +896,12 @@ class MatrixElementBuilder:
         pref_second = -0.5 / mu if mu != 0.0 else 0.0
         pref_first = -1.0 / mu if mu != 0.0 else 0.0
         pref_centrifugal = 0.5 / mu if mu != 0.0 else 0.0
+
+        # --- 质量极化系数修正 (论文更正) ---
+        # 论文公式 (2.37) 的 -1/4M 疑似笔误，正确应为 -1/2M (H_MP = -1/M grad1.grad2)
         pref_cross = -0.5 / M if M != 0.0 else 0.0
+        # --------------------------------
+
         pref_mu_first_extra = pref_second
         pref_mass_first_extra = 0.5 / M if M != 0.0 else 0.0
         pref_mu_mix = pref_second
@@ -1026,7 +1048,12 @@ class MatrixElementBuilder:
         if not chunks:
             return []
 
-        ctx = mp.get_context("spawn")
+        # 自动选择启动模式 (Linux -> fork, 其他 -> spawn)
+        try:
+            ctx = mp.get_context(None)
+        except ValueError:
+            ctx = mp.get_context("spawn")
+
         payload = _WorkerPayload(
             builder=self,
             expanded_states=expanded_states,

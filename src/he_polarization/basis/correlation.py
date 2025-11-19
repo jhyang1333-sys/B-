@@ -94,5 +94,46 @@ class CorrelationExpansion:
             product *= (2 * k + 2 * t - c) / (2 * k + 2 * q - 2 * t + 1)
         return numerator * product
 
+    @staticmethod
+    def estimate_truncation_error(c: int, q_max: int, r_ratio: float = 0.9) -> float:
+        """
+        估算勒让德展开的截断误差。
+
+        Parameters
+        ----------
+        r_ratio : float
+            r_</r_> 的比值。取 0.9 表示较坏情况（收敛慢）。
+        """
+        if c % 2 == 0:
+            return 0.0  # 偶数次幂是有限项，无截断误差
+
+        # 对于奇数次幂，系数衰减大约为 O(q^{-2.5}) * r_ratio^q
+        # 这里计算最后一项的相对贡献作为误差估计
+
+        # 取展开式中最后一项的 k=0 的系数近似
+        # C_{c, q_max, 0} ~ 1/q_max
+        last_coeff = CorrelationExpansion._coefficient(c, q_max, 0)
+
+        # 相对误差估计
+        error = abs(last_coeff) * (r_ratio ** q_max)
+        return error
+
+    def check_convergence(self, c: int, tolerance: float = 1e-12) -> bool:
+        """检查当前 q_cutoff 设置是否满足精度要求。"""
+        if c % 2 == 0:
+            return True
+
+        # 获取当前使用的 q_max
+        q_max = self._q_cutoff.get(c, 2 * (c + 5))
+
+        # 在 r_</r_> = 0.9 处估算误差
+        error = self.estimate_truncation_error(c, q_max, r_ratio=0.9)
+
+        if error > tolerance:
+            print(f"Warning: Legendre expansion for c={c} (q_max={q_max}) "
+                  f"may not converge to {tolerance:.1e} (est. error={error:.1e})")
+            return False
+        return True
+
 
 __all__ = ["CorrelationExpansion", "CorrelationTerm"]
