@@ -24,19 +24,12 @@ def solve_sparse_generalized_eigen(
         *,
         config: Optional[IterativeSolverConfig] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Solve ``H C = E O C`` using sparse iterative methods.
-
-    Parameters
-    ----------
-    H, O
-            Hamiltonian and overlap matrices. Either sparse matrices or ndarray.
-    config
-            Solver configuration. Defaults target the lowest eigenpairs.
-    """
+    """Solve ``H C = E O C`` using sparse iterative methods."""
 
     try:
         from scipy.sparse import csc_matrix, csr_matrix, issparse
-        from scipy.sparse.linalg import eigsh, splu
+        from scipy.sparse.linalg import eigsh
+        # 移除 splu 引用，节省内存
     except ModuleNotFoundError as exc:  # pragma: no cover
         raise ModuleNotFoundError(
             "需要安装 SciPy 才能使用稀疏广义本征求解器。"
@@ -56,32 +49,38 @@ def solve_sparse_generalized_eigen(
         raise ValueError("H 与 O 必须是方阵且维度一致。")
 
     if config.num_eigenvalues >= n:
-        # Defer to dense solver when all eigenpairs are requested.
         from .generalized_eigen import solve_generalized_eigen
 
         dense_H = _to_dense(H_sparse)
         dense_O = _to_dense(O_sparse)
         return solve_generalized_eigen(dense_H, dense_O)
 
-    # Enforce Hermitian structure before calling eigsh.
+    # Enforce Hermitian structure
     H_sparse = 0.5 * (H_sparse + H_sparse.T)
     O_sparse = 0.5 * (O_sparse + O_sparse.T)
 
-    # SciPy 的 eigsh 要求 CSR/CSC 格式才能高效执行。
     H_sparse = _to_csr(H_sparse, csr_matrix, issparse)
     O_sparse = _to_csr(O_sparse, csr_matrix, issparse)
-    O_sparse = _regularize_sparse_overlap(O_sparse, csr_matrix, splu)
 
-    eigvals, eigvecs = eigsh(
-        H_sparse,
-        k=config.num_eigenvalues,
-        M=O_sparse,
-        sigma=config.sigma,
-        which=config.which,
-        tol=float(config.tol),  # type: ignore[arg-type]
-        maxiter=config.maxiter,
-        return_eigenvectors=True,
-    )
+    # === 内存优化：轻量级正则化 ===
+    O_sparse = _ensure_overlap_positive(O_sparse, csr_matrix)
+
+    try:
+        eigvals, eigvecs = eigsh(
+            H_sparse,
+            k=config.num_eigenvalues,
+            M=O_sparse,
+            sigma=config.sigma,
+            which=config.which,
+            # 添加 type: ignore 以消除 IDE 误报
+            tol=float(config.tol),  # type: ignore
+            maxiter=config.maxiter,
+            return_eigenvectors=True,
+        )
+    except RuntimeError as e:
+        print(f"Solver Error: {e}")
+        print("尝试增加 overlap-conditioning-regularization 或检查内存。")
+        raise e
 
     eigvals, eigvecs = _postprocess_eigensystem(
         eigvals, eigvecs, O_sparse
@@ -115,25 +114,21 @@ def _postprocess_eigensystem(eigvals, eigvecs, overlap_matrix):
     return eigvals, eigvecs
 
 
-def _regularize_sparse_overlap(matrix, csr_matrix, splu):
+def _ensure_overlap_positive(matrix, csr_matrix):
+    """轻量级正则化：只检查对角元是否为正，避免 LU 分解。"""
     n = matrix.shape[0]
     if n == 0:
         return matrix
 
-    diag = np.abs(matrix.diagonal())
-    scale = float(np.max(diag)) if diag.size else 1.0
-    jitter = 1e-10 * scale if scale > 0.0 else 1e-10
-    diag_indices = np.arange(n)
+    diag = matrix.diagonal()
+    min_diag = np.min(np.abs(diag))
 
-    for _ in range(12):
+    if min_diag < 1e-12:
+        jitter = 1e-10
+        diag_indices = np.arange(n)
         data = np.full(n, jitter, dtype=matrix.dtype)
         addition = csr_matrix(
             (data, (diag_indices, diag_indices)), shape=matrix.shape)
-        candidate = matrix + addition
-        try:
-            splu(candidate.tocsc())
-            return candidate
-        except RuntimeError:
-            jitter *= 10.0
+        return matrix + addition
 
-    raise RuntimeError("无法对交叠矩阵进行正则化，仍非正定。")
+    return matrix

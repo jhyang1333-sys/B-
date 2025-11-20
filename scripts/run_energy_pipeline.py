@@ -48,6 +48,14 @@ def parse_args() -> argparse.Namespace:
                         help="Eigenvalue tolerance for channel-wise pruning.")
     parser.add_argument("--channel-ortho-max-dim", type=int, default=512,
                         help="Largest channel block size handled via dense eigendecomposition.")
+
+    # === 新增安全模式参数 ===
+    parser.add_argument("--disable-channel-ortho-safe-mode", action="store_true",
+                        help="Disable physics-based rescue of dropped states (default: rescue enabled).")
+    parser.add_argument("--channel-ortho-safe-threshold", type=float, default=-2.0,
+                        help="Energy threshold (a.u.) below which states are forced to be kept.")
+    # ======================
+
     parser.add_argument("--disable-overlap-conditioning", action="store_true",
                         help="Disable overlap-matrix stabilization (default: enabled).")
     parser.add_argument("--overlap-conditioning-tol", type=float, default=1e-10,
@@ -62,7 +70,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def verify_hamiltonian_coefficients(mu: float, M: float):
-    """导师建议：启动前验证哈密顿量关键系数符号与大小"""
+    """启动前验证哈密顿量关键系数符号与大小"""
     print("Verifying Hamiltonian coefficients...")
 
     # 质量极化系数检查 (-1/2M)
@@ -81,10 +89,10 @@ def main() -> None:
     args = parse_args()
 
     # --- 关键参数：数值稳定组合 (Yang 2019) ---
-    tau = 0.038
-    r_max = 150.0   # 必须足够大
-    k = 6           # 必须是高阶
-    n = 10          # 节点数配合 r_max
+    tau = 0.14     # 0.038
+    r_max = 60.0   # 必须足够大
+    k = 7           # 必须是高阶
+    n = 25          # 节点数配合 r_max
     l_max = 2       # 包含 s, p, d, f 波
     # ----------------------------------------
 
@@ -131,6 +139,8 @@ def main() -> None:
         channel_ortho = ChannelOrthogonalizer(
             tolerance=args.channel_ortho_tol,
             max_block_dim=args.channel_ortho_max_dim,
+            safe_mode=(not args.disable_channel_ortho_safe_mode),
+            safe_mode_threshold=args.channel_ortho_safe_threshold,
         )
 
     conditioner = None
@@ -169,6 +179,7 @@ def main() -> None:
         "channel_ortho_tol": args.channel_ortho_tol,
         "channel_ortho_max_dim": args.channel_ortho_max_dim,
         "channel_ortho_enabled": channel_ortho is not None,
+        "channel_ortho_safe_mode": (not args.disable_channel_ortho_safe_mode) if channel_ortho else False,
     }
 
     cache = SolverResultCache(args.cache_dir)

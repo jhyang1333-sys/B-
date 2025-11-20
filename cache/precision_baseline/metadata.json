@@ -1,0 +1,23 @@
+{
+  "channel_ortho_max_dim": 512,
+  "channel_ortho_tol": 1e-10,
+  "correlation_powers": [
+    0,
+    1
+  ],
+  "exchange_parity": 1,
+  "k": 5,
+  "l_max": 2,
+  "n": 5,
+  "n_radial": 8,
+  "num_eigenvalues": 5,
+  "overlap_max_dim": 4096,
+  "overlap_mode": "auto",
+  "overlap_regularization": 1e-08,
+  "overlap_tol": 1e-10,
+  "r_max": 20.0,
+  "stage": "baseline",
+  "symmetrize": true,
+  "tau": 0.038,
+  "unique_pairs": true
+}
