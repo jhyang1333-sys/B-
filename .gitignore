@@ -1,0 +1,52 @@
+# Python build/runtime artifacts
+__pycache__/
+*.py[cod]
+*.so
+*.egg
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual environments & env metadata
+.env/
+.venv/
+venv/
+.envrc
+*.env
+.conda/
+
+# Jupyter/IPython
+.ipynb_checkpoints/
+
+# Logs & profiling
+*.log
+profile_reports/
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+.vscode/
+
+# Coverage / test artifacts
+.coverage*
+htmlcov/
+pytest_cache/
+
+# Cache & generated numeric data (adjust as needed)
+# If cache contents are reproducible, you can keep them tracked.
+# Uncomment the next line to ignore all cached numeric results:
+# cache/
+# Or only ignore large arrays (keep metadata):
+# cache/**/*.npz
+
+# Plot outputs / figures (if generated)
+figures/
+
+# Temporary scratch / experiments
+scratch/
+
+# Credentials (never commit real secrets)
+*.key
+*.pem
+*.cert
