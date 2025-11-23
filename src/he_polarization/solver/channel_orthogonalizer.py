@@ -43,7 +43,7 @@ class ChannelOrthogonalizer:
     include_correlation_power: bool = True
 
     # === 新增参数：安全模式 ===
-    safe_mode: bool = True
+    safe_mode: bool = False
     safe_mode_threshold: float = -1e15  # 如果能量低于此值（更负），则强制保留
     # ========================
 

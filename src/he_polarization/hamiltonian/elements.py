@@ -902,10 +902,10 @@ class MatrixElementBuilder:
         pref_cross = -0.5 / M if M != 0.0 else 0.0
         # --------------------------------
 
-        pref_mu_first_extra = -2.0 * pref_second
-        pref_mass_first_extra = -2.0 * (0.5 / M if M != 0.0 else 0.0)
-        pref_mu_mix = -2.0 * pref_second
-        pref_mass_mix = pref_mass_first_extra
+        pref_mu_first_extra = 0.0
+        pref_mass_first_extra = 0.0
+        pref_mu_mix = 0.0
+        pref_mass_mix = 0.0
         pref_mu_j = 1.0 / mu if mu != 0.0 else 0.0
         pref_mass_j = -1.0 / M if M != 0.0 else 0.0
         scalar_pref_nonzero = pref_mu_mix != 0.0 or pref_mass_mix != 0.0
