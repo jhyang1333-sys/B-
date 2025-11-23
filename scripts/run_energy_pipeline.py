@@ -52,7 +52,7 @@ def parse_args() -> argparse.Namespace:
     # === 新增安全模式参数 ===
     parser.add_argument("--disable-channel-ortho-safe-mode", action="store_true",
                         help="Disable physics-based rescue of dropped states (default: rescue enabled).")
-    parser.add_argument("--channel-ortho-safe-threshold", type=float, default=-2.0,
+    parser.add_argument("--channel-ortho-safe-threshold", type=float, default=0.0,
                         help="Energy threshold (a.u.) below which states are forced to be kept.")
     # ======================
 
@@ -89,10 +89,10 @@ def main() -> None:
     args = parse_args()
 
     # --- 关键参数：数值稳定组合 (Yang 2019) ---
-    tau = 0.14     # 0.038
-    r_max = 60.0   # 必须足够大
-    k = 7           # 必须是高阶
-    n = 25          # 节点数配合 r_max
+    tau = 0.38     # 0.038
+    r_max = 20.0   # 必须足够大
+    k = 6           # 必须是高阶
+    n = 10          # 节点数配合 r_max
     l_max = 2       # 包含 s, p, d, f 波
     # ----------------------------------------
 

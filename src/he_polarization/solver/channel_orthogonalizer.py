@@ -37,14 +37,14 @@ class ChannelOrthoResult:
 class ChannelOrthogonalizer:
     """Per-channel canonical orthonormalization and pruning."""
 
-    tolerance: float = 1e-10
+    tolerance: float = 1e-12
     max_block_dim: int = 2048
     include_exchange_parity: bool = True
     include_correlation_power: bool = True
 
     # === 新增参数：安全模式 ===
     safe_mode: bool = True
-    safe_mode_threshold: float = -2.0  # 如果能量低于此值（更负），则强制保留
+    safe_mode_threshold: float = -1e15  # 如果能量低于此值（更负），则强制保留
     # ========================
 
     def apply(
