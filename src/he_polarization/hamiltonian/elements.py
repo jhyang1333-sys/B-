@@ -621,12 +621,12 @@ def _compute_element_numba(
                                 coeff_mu = 0.0
                                 coeff_mass = 0.0
                                 if mu != 0.0:
-                                    coeff_mu = (-2.0 / mu) * c_col
+                                    coeff_mu = (-1.0 / mu) * c_col
                                 if M != 0.0:
                                     coeff_mass = (2.0 / M) * c_col
                                 if c_col >= 2:
                                     if mu != 0.0:
-                                        coeff_mu += (-1.0 / mu) * \
+                                        coeff_mu += (-0.5 / mu) * \
                                             c_col * (c_col - 1)
                                     if M != 0.0:
                                         coeff_mass += (1.0 / M) * \
